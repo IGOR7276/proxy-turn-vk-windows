@@ -100,9 +100,55 @@ var profileList = []Profile{
 		SecChUaMobile:   "?0",
 		SecChUaPlatform: `"Linux"`,
 	},
+	{
+		UserAgent:       "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0",
+		SecChUa:         `"Firefox";v="132", "Not-A.Brand";v="8", "Mozilla Firefox";v="132"`,
+		SecChUaMobile:   "?0",
+		SecChUaPlatform: `"Windows"`,
+	},
+}
+
+var androidProfiles = []Profile{
+	{
+		UserAgent:       "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Mobile Safari/537.36",
+		SecChUa:         `"Chromium";v="129", "Not-A.Brand";v="24", "Google Chrome";v="129"`,
+		SecChUaMobile:   "?1",
+		SecChUaPlatform: `"Android"`,
+	},
+}
+
+var iosProfiles = []Profile{
+	{
+		UserAgent:       "Mozilla/5.0 (iPhone; CPU iPhone OS 17_6_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Mobile/15E148 Safari/604.1",
+		SecChUa:         `"Safari";v="17", "Not-A.Brand";v="24", "Apple Safari";v="17"`,
+		SecChUaMobile:   "?1",
+		SecChUaPlatform: `"iOS"`,
+	},
+}
+
+var activeFingerprint = "chrome"
+
+func SetActiveFingerprint(fp string) {
+	activeFingerprint = fp
+}
+
+func GetActiveFingerprint() string {
+	return activeFingerprint
 }
 
 // getRandomProfile returns a paired User-Agent and Client Hints profile.
 func getRandomProfile() Profile {
-	return profileList[rand.Intn(len(profileList))]
+	switch activeFingerprint {
+	case "android":
+		return androidProfiles[rand.Intn(len(androidProfiles))]
+	case "ios":
+		return iosProfiles[rand.Intn(len(iosProfiles))]
+	case "safari":
+		return profileList[4] // Using macOS Chrome as approximation for Safari if no specific Safari profile exists, or implement one. Actually, let's just use iOS for safari or macos.
+	case "firefox":
+		return profileList[len(profileList)-1]
+	default:
+		// chrome, or unknown, pick from first few chrome profiles
+		return profileList[rand.Intn(3)]
+	}
 }

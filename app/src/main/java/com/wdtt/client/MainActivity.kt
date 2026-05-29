@@ -114,6 +114,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        
+        TunnelManager.initObservers(this)
+
         enableEdgeToEdge()
 
         checkAndRequestNotifications()
@@ -123,6 +126,8 @@ class MainActivity : ComponentActivity() {
             val themeMode by settingsStore.themeMode.collectAsStateWithLifecycle(initialValue = "system")
             val isDynamicColor by settingsStore.isDynamicColor.collectAsStateWithLifecycle(initialValue = false)
             val themePalette by settingsStore.themePalette.collectAsStateWithLifecycle(initialValue = "indigo")
+            val activeFingerprint by settingsStore.selectedFingerprint.collectAsStateWithLifecycle(initialValue = "chrome")
+            val activeClientIds by settingsStore.activeClientIds.collectAsStateWithLifecycle(initialValue = "6287487,8202606")
             val scope = rememberCoroutineScope()
 
             WDTTTheme(themeMode = themeMode, dynamicColor = isDynamicColor, themePalette = themePalette) {
@@ -141,6 +146,14 @@ class MainActivity : ComponentActivity() {
                     currentPalette = themePalette,
                     onPaletteChange = { palette ->
                         scope.launch { settingsStore.saveThemePalette(palette) }
+                    },
+                    activeFingerprint = activeFingerprint,
+                    onFingerprintChange = { fp ->
+                        scope.launch { settingsStore.saveFingerprint(fp) }
+                    },
+                    activeClientIds = activeClientIds,
+                    onClientIdsChange = { ids ->
+                        scope.launch { settingsStore.saveActiveClientIds(ids) }
                     }
                 )
             }
@@ -213,7 +226,11 @@ fun MainScreen(
     isDynamicColor: Boolean = false,
     onDynamicColorChange: (Boolean) -> Unit = {},
     currentPalette: String = "indigo",
-    onPaletteChange: (String) -> Unit = {}
+    onPaletteChange: (String) -> Unit = {},
+    activeFingerprint: String = "chrome",
+    onFingerprintChange: (String) -> Unit = {},
+    activeClientIds: String = "6287487,8202606",
+    onClientIdsChange: (String) -> Unit = {}
 ) {
     val unreadErrors by TunnelManager.unreadErrorCount.collectAsStateWithLifecycle()
     val tunnelRunning by TunnelManager.running.collectAsStateWithLifecycle()
@@ -411,7 +428,11 @@ fun MainScreen(
             isDynamicColor = isDynamicColor,
             onDynamicColorChange = onDynamicColorChange,
             currentPalette = currentPalette,
-            onPaletteChange = onPaletteChange
+            onPaletteChange = onPaletteChange,
+            activeFingerprint = activeFingerprint,
+            onFingerprintChange = onFingerprintChange,
+            activeClientIds = activeClientIds,
+            onClientIdsChange = onClientIdsChange
         )
     }
 

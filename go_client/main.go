@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 )
 
 // CaptchaResultChan — канал для получения токена капчи из внешнего решателя (WebView)
@@ -109,6 +110,16 @@ func main() {
 		}
 	}()
 
+	ppid := os.Getppid()
+	go func() {
+		for {
+			time.Sleep(2 * time.Second)
+			if os.Getppid() != ppid {
+				os.Exit(0)
+			}
+		}
+	}()
+
 	host := flag.String("turn", "", "переопределить IP TURN")
 	port := flag.String("port", "", "переопределить порт TURN")
 	listen := flag.String("listen", "127.0.0.1:9000", "локальный адрес")
@@ -119,6 +130,8 @@ func main() {
 	deviceID := flag.String("device-id", "unknown", "уникальный ID устройства")
 	connPassword := flag.String("password", "", "пароль подключения")
 	captchaMode := flag.String("captcha-mode", "auto", "режим обхода капчи (auto/wv/rjs)")
+	fingerprint := flag.String("fingerprint", "chrome", "браузерный фингерпринт (chrome, safari, ios, android, firefox)")
+	clientIdsFlag := flag.String("client-ids", "", "ID клиентов VK через запятую")
 
 	flag.Parse()
 	activeCaptchaMode := setCaptchaMode(*captchaMode)
@@ -127,9 +140,25 @@ func main() {
 		log.Fatal("[КЛИЕНТ] Нужны -peer и -vk")
 	}
 
-	peer, err := net.ResolveUDPAddr("udp", *peerAddr)
+	cleanPeerAddr := strings.TrimSpace(*peerAddr)
+	var err error
+	var peer *net.UDPAddr
+	for i := 0; i < 15; i++ {
+		peer, err = net.ResolveUDPAddr("udp", cleanPeerAddr)
+		if err == nil {
+			break
+		}
+		time.Sleep(1 * time.Second)
+	}
 	if err != nil {
 		log.Fatalf("[КЛИЕНТ] Ошибка разбора пира: %v", err)
+	}
+
+	if *fingerprint != "" {
+		SetActiveFingerprint(*fingerprint)
+	}
+	if *clientIdsFlag != "" {
+		SetActiveClientIds(*clientIdsFlag)
 	}
 
 	hashes := ParseHashes(*vkHash)
@@ -164,10 +193,25 @@ func main() {
 		WrapKey: wrapKey,
 	}
 
-	// Слушаем локально
-	localConn, err := net.ListenPacket("udp", *listen)
+	// Слушаем локально с ожиданием (если старый процесс еще не убит Parent Watcher'ом)
+	var localConn net.PacketConn
+	actualListenAddr := *listen
+	for i := 0; i < 5; i++ {
+		localConn, err = net.ListenPacket("udp", actualListenAddr)
+		if err == nil {
+			break
+		}
+		log.Printf("[ОЖИДАНИЕ] Порт %s занят (возможно, старый процесс завершается). Жду... (%d/5)", actualListenAddr, i+1)
+		time.Sleep(1 * time.Second)
+	}
+
 	if err != nil {
-		log.Fatalf("[КЛИЕНТ] Ошибка слушателя %s: %v", *listen, err)
+		log.Printf("[АВТО-ПОРТ] Порт %s всё ещё занят. Пробую случайный динамический порт...", actualListenAddr)
+		actualListenAddr = "127.0.0.1:0"
+		localConn, err = net.ListenPacket("udp", actualListenAddr)
+		if err != nil {
+			log.Fatalf("[ФАТАЛ] Ошибка бинда динамического порта: %v", err)
+		}
 	}
 	if uc, ok := localConn.(*net.UDPConn); ok {
 		_ = uc.SetReadBuffer(socketBufSize)
@@ -176,7 +220,7 @@ func main() {
 	stopLocalConn := context.AfterFunc(ctx, func() { _ = localConn.Close() })
 	defer stopLocalConn()
 
-	_, localPort, _ := net.SplitHostPort(*listen)
+	_, localPort, _ := net.SplitHostPort(localConn.LocalAddr().String())
 	if localPort == "" {
 		localPort = "9000"
 	}
@@ -197,11 +241,11 @@ func main() {
 	}
 
 	log.Println("[КЛИЕНТ] ═══════════════════════════════════════")
-	log.Printf("[КЛИЕНТ] VK Creds: 2 stable app_id с циклическим fallback")
-	log.Printf("[КЛИЕНТ] TLS: Chrome 146 fingerprint")
+	log.Printf("[КЛИЕНТ] VK Creds: Client IDs: %s", GetActiveClientIdsString())
+	log.Printf("[КЛИЕНТ] TLS: %s fingerprint", GetActiveFingerprint())
 	log.Printf("[КЛИЕНТ] Воркеров: %d (групп: %d, по %d)", *numW, numGroups, workersPerGroup)
 	log.Printf("[КЛИЕНТ] Хешей: %d", len(hashes))
-	log.Printf("[КЛИЕНТ] Слушаю: %s | Пир: %s", *listen, *peerAddr)
+	log.Printf("[КЛИЕНТ] Слушаю: %s | Пир: %s", *listen, cleanPeerAddr)
 	log.Printf("[КЛИЕНТ] Протокол: UDP")
 	log.Printf("[КЛИЕНТ] WRAP: %s", wrapStatus)
 	log.Printf("[WRAP] Ключ выведен из пароля, режим RTP AEAD активен")

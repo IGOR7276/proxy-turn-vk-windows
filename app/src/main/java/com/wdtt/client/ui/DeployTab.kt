@@ -63,6 +63,11 @@ fun DeployTab() {
     var login by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
 
+    val savedDns1 by settingsStore.deployDns1.collectAsStateWithLifecycle(initialValue = "1.1.1.1")
+    val savedDns2 by settingsStore.deployDns2.collectAsStateWithLifecycle(initialValue = "1.0.0.1")
+    var dns1 by remember { mutableStateOf("1.1.1.1") }
+    var dns2 by remember { mutableStateOf("1.0.0.1") }
+
     val savedMainPass by settingsStore.deployMainPassword.collectAsStateWithLifecycle(initialValue = "")
     val savedAdminId by settingsStore.deployAdminId.collectAsStateWithLifecycle(initialValue = "")
     val savedBotToken by settingsStore.deployBotToken.collectAsStateWithLifecycle(initialValue = "")
@@ -94,6 +99,8 @@ fun DeployTab() {
     LaunchedEffect(savedIp) { ip = savedIp }
     LaunchedEffect(savedLogin) { login = savedLogin }
     LaunchedEffect(savedPassword) { password = savedPassword }
+    LaunchedEffect(savedDns1) { dns1 = savedDns1 }
+    LaunchedEffect(savedDns2) { dns2 = savedDns2 }
     val animatedProgress by animateFloatAsState(
         targetValue = deployProgress,
         animationSpec = tween(durationMillis = 1200, easing = androidx.compose.animation.core.FastOutSlowInEasing),
@@ -119,7 +126,7 @@ fun DeployTab() {
                 value = ip,
                 onValueChange = {
                     ip = it.filter { c -> !c.isWhitespace() }
-                    scope.launch { settingsStore.saveDeploy(ip, login, password, savedSshPort) }
+                    scope.launch { settingsStore.saveDeploy(ip, login, password, savedSshPort, dns1, dns2) }
                 },
                 label = { Text("IP сервера или домен (без порта)") },
                 placeholder = { Text("1.2.3.4 (без порта)") },
@@ -137,7 +144,7 @@ fun DeployTab() {
                     value = login,
                     onValueChange = {
                         login = it.filter { c -> !c.isWhitespace() }
-                        scope.launch { settingsStore.saveDeploy(ip, login, password, savedSshPort) }
+                        scope.launch { settingsStore.saveDeploy(ip, login, password, savedSshPort, dns1, dns2) }
                     },
                     label = { Text("Логин") },
                     placeholder = { Text("root") },
@@ -150,10 +157,42 @@ fun DeployTab() {
                     value = password,
                     onValueChange = {
                         password = it.filter { c -> !c.isWhitespace() }
-                        scope.launch { settingsStore.saveDeploy(ip, login, password, savedSshPort) }
+                        scope.launch { settingsStore.saveDeploy(ip, login, password, savedSshPort, dns1, dns2) }
                     },
                     label = { Text("Пароль SSH") },
                     placeholder = { Text("password") },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(16.dp),
+                    enabled = !isDeploying,
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                OutlinedTextField(
+                    value = dns1,
+                    onValueChange = {
+                        dns1 = it.filter { c -> !c.isWhitespace() }
+                        scope.launch { settingsStore.saveDeploy(ip, login, password, savedSshPort, dns1, dns2) }
+                    },
+                    label = { Text("Основной DNS") },
+                    placeholder = { Text("1.1.1.1") },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(16.dp),
+                    enabled = !isDeploying,
+                )
+                OutlinedTextField(
+                    value = dns2,
+                    onValueChange = {
+                        dns2 = it.filter { c -> !c.isWhitespace() }
+                        scope.launch { settingsStore.saveDeploy(ip, login, password, savedSshPort, dns1, dns2) }
+                    },
+                    label = { Text("Резервный DNS") },
+                    placeholder = { Text("1.0.0.1") },
                     singleLine = true,
                     modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(16.dp),
@@ -278,7 +317,7 @@ fun DeployTab() {
                                 context = appContext,
                                 host = ip, user = effectiveLogin, pass = password, port = savedSshPort.toIntOrNull() ?: 22,
                                 mainPass = savedMainPass, adminId = savedAdminId, botToken = savedBotToken,
-                                dtlsPort = effectiveDtlsPort, wgPort = effectiveWgPort,
+                                dtlsPort = effectiveDtlsPort, wgPort = effectiveWgPort, dns1 = dns1, dns2 = dns2,
                                 onProgress = { p, s -> DeployManager.updateProgress(p, s) }
                             )
                             if (success) {
@@ -531,7 +570,7 @@ private suspend fun performDeploy(
     context: Context,
     host: String, user: String, pass: String, port: Int,
     mainPass: String, adminId: String, botToken: String,
-    dtlsPort: Int, wgPort: Int,
+    dtlsPort: Int, wgPort: Int, dns1: String, dns2: String,
     onProgress: (Float, String) -> Unit
 ): Boolean = withContext(Dispatchers.IO) {
     var session: Session? = null
@@ -542,10 +581,11 @@ private suspend fun performDeploy(
         val ssh = SSHClient(session, pass)
 
         onProgress(0.05f, "Подготовка файлов...")
-        val passArg = if (mainPass.isNotBlank()) "-password \"$mainPass\" " else ""
-        val adminArg = if (adminId.isNotBlank()) "-admin \"$adminId\" " else ""
-        val botArg = if (botToken.isNotBlank()) "-bot-token \"$botToken\" " else ""
-        val args = "$passArg$adminArg$botArg".trim()
+        val passArg = if (mainPass.isNotBlank()) "-password $mainPass " else ""
+        val adminArg = if (adminId.isNotBlank()) "-admin $adminId " else ""
+        val botArg = if (botToken.isNotBlank()) "-bot-token $botToken " else ""
+        val dnsArg = "-dns ${if(dns1.isNotBlank()) dns1 else "1.1.1.1"}${if(dns2.isNotBlank()) ",$dns2" else ""} "
+        val args = "$passArg$adminArg$botArg$dnsArg".trim()
 
         val scriptFile = File(context.cacheDir, "deploy.sh")
         val serverFile = File(context.cacheDir, "server")
@@ -734,14 +774,20 @@ fun DeploySecretsDialog(
 
                 Spacer(Modifier.height(16.dp))
 
+                val isPasswordValid = passInput.isNotEmpty() && passInput.matches(Regex("^[a-zA-Z0-9_.!?:#/-]+$"))
+
                 OutlinedTextField(
                     value = passInput,
-                    onValueChange = { passInput = it },
+                    onValueChange = { passInput = it.filter { c -> !c.isWhitespace() } },
                     label = { Text("Задайте пароль туннеля (любой)") },
                     placeholder = { Text("Придумайте надежный пароль") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(16.dp)
+                    shape = RoundedCornerShape(16.dp),
+                    isError = passInput.isNotEmpty() && !isPasswordValid,
+                    supportingText = if (passInput.isNotEmpty() && !isPasswordValid) {
+                        { Text("Разрешены только буквы, цифры и симв: _ . ! ? : # - /", color = MaterialTheme.colorScheme.error) }
+                    } else null
                 )
 
                 Spacer(Modifier.height(16.dp))
@@ -842,7 +888,7 @@ fun DeploySecretsDialog(
                     },
                     modifier = Modifier.fillMaxWidth().height(48.dp),
                     shape = RoundedCornerShape(16.dp),
-                    enabled = passInput.isNotBlank(),
+                    enabled = isPasswordValid,
                     colors = ButtonDefaults.buttonColors(contentColor = MaterialTheme.colorScheme.onPrimary)
                 ) { Text("Сохранить", fontWeight = FontWeight.SemiBold) }
             }

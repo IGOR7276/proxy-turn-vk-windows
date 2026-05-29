@@ -13,8 +13,8 @@ android {
         applicationId = "com.wdtt.client"
         minSdk = 28
         targetSdk = 35
-        versionCode = 120
-        versionName = "1.2.0"
+        versionCode = 122
+        versionName = "1.2.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {

@@ -385,11 +385,12 @@ func RunSession(
 	go func() {
 		defer proxyWg.Done()
 		defer sessCancel()
-		b := make([]byte, 2000)
 		for {
+			pkt := getPktBuf(2048)
 			_ = dtlsConn.SetReadDeadline(time.Now().Add(sessionReadTimeout))
-			n, readErr := dtlsConn.Read(b)
+			n, readErr := dtlsConn.Read(pkt)
 			if readErr != nil {
+				putPktBuf(pkt)
 				if sessCtx.Err() != nil {
 					return
 				}
@@ -401,12 +402,12 @@ func RunSession(
 			}
 
 			// Skip keepalive pong from server
-			if n == 1 && b[0] == keepaliveByte {
+			if n == 1 && pkt[0] == keepaliveByte {
+				putPktBuf(pkt)
 				continue
 			}
 
-			pkt := getPktBuf(n)
-			copy(pkt, b[:n])
+			pkt = pkt[:n]
 			select {
 			case d.ReturnCh <- pkt:
 			case <-sessCtx.Done():

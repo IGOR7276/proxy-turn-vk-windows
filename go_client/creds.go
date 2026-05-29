@@ -33,6 +33,36 @@ var vkCredentialsList = []VKCredentials{
 	{ClientID: "8202606", ClientSecret: "lMRsTiMCyPnp5vfoldmn"},
 }
 
+// Full list of known credentials to match against when setting active client IDs
+var knownVKCredentials = map[string]VKCredentials{
+	"6287487": {ClientID: "6287487", ClientSecret: "MuAxFaKDYDOICzGnEOhp"},
+	"8202606": {ClientID: "8202606", ClientSecret: "lMRsTiMCyPnp5vfoldmn"},
+}
+
+func SetActiveClientIds(ids string) {
+	if ids == "" {
+		return
+	}
+	var newCreds []VKCredentials
+	for _, id := range strings.Split(ids, ",") {
+		id = strings.TrimSpace(id)
+		if cred, ok := knownVKCredentials[id]; ok {
+			newCreds = append(newCreds, cred)
+		}
+	}
+	if len(newCreds) > 0 {
+		vkCredentialsList = newCreds
+	}
+}
+
+func GetActiveClientIdsString() string {
+	var ids []string
+	for _, cred := range vkCredentialsList {
+		ids = append(ids, cred.ClientID)
+	}
+	return strings.Join(ids, ", ")
+}
+
 const vkCredentialAttemptLimit = 4
 
 // ─── Credential Caching ───

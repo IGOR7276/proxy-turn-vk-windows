@@ -90,6 +90,9 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
     val wdttLinkMode by settingsStore.wdttLinkMode.collectAsStateWithLifecycle(initialValue = false)
     val wdttLink by settingsStore.wdttLink.collectAsStateWithLifecycle(initialValue = "")
 
+    val activeFingerprint by settingsStore.selectedFingerprint.collectAsStateWithLifecycle(initialValue = "chrome")
+    val activeClientIds by settingsStore.activeClientIds.collectAsStateWithLifecycle(initialValue = "6287487,8202606")
+
     val tunnelRunning by TunnelManager.running.collectAsStateWithLifecycle()
 
     val cooldownActive by TunnelManager.cooldownActive.collectAsStateWithLifecycle()
@@ -308,6 +311,8 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
             putExtra("connection_password", finalPassword)
             putExtra("captcha_mode", effectiveCaptchaMode)
             putExtra("captcha_solve_method", effectiveCaptchaSolveMethod)
+            putExtra("fingerprint", activeFingerprint)
+            putExtra("client_ids", activeClientIds)
         }
         if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent)
         else context.startService(intent)
@@ -402,7 +407,7 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
                         OutlinedTextField(
                             value = peerInput,
                             onValueChange = {
-                                peerInput = it.filter { c -> c != ' ' }
+                                peerInput = it.filter { c -> !c.isWhitespace() }
                                 scheduleSave()
                             },
                             label = { Text("IP сервера или домен (без порта)") },
@@ -658,8 +663,9 @@ fun SettingsTabContent(context: android.content.Context, scope: kotlinx.coroutin
                             OutlinedTextField(
                                 value = linkText,
                                 onValueChange = {
-                                    linkText = it.trim()
-                                    scope.launch { settingsStore.saveWdttLink(it.trim()) }
+                                    val cleaned = it.filter { c -> !c.isWhitespace() }
+                                    linkText = cleaned
+                                    scope.launch { settingsStore.saveWdttLink(cleaned) }
                                 },
                                 label = { Text("Ссылка wdtt://") },
                                 placeholder = { Text("Ссылка wdtt://") },
@@ -1117,12 +1123,18 @@ fun SecretsDialog(
 
                 Spacer(modifier = Modifier.height(16.dp))
 
+                val isPasswordValid = passwordInput.isNotEmpty() && passwordInput.matches(Regex("^[a-zA-Z0-9_.!?:#/-]+$"))
+
                 OutlinedTextField(
                     value = passwordInput,
-                    onValueChange = { passwordInput = it },
+                    onValueChange = { passwordInput = it.filter { c -> !c.isWhitespace() } },
                     label = { Text("Заданный пароль туннеля") },
                     placeholder = { Text("Придумайте надежный пароль") },
                     singleLine = true,
+                    isError = passwordInput.isNotEmpty() && !isPasswordValid,
+                    supportingText = if (passwordInput.isNotEmpty() && !isPasswordValid) {
+                        { Text("Разрешены только буквы, цифры и знаки . ! ? : # - _ /", color = MaterialTheme.colorScheme.error) }
+                    } else null,
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(16.dp),
                 )
@@ -1183,7 +1195,7 @@ fun SecretsDialog(
                     },
                     modifier = Modifier.fillMaxWidth().height(48.dp),
                     shape = RoundedCornerShape(16.dp),
-                    enabled = passwordInput.isNotEmpty(),
+                    enabled = isPasswordValid,
                     colors = ButtonDefaults.buttonColors(contentColor = MaterialTheme.colorScheme.onPrimary)
                 ) {
                     Text("Сохранить", fontWeight = FontWeight.SemiBold)

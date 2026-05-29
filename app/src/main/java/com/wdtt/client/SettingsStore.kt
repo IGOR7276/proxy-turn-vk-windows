@@ -48,6 +48,8 @@ class SettingsStore(context: Context) {
         private val DEPLOY_PASSWORD = stringPreferencesKey("deploy_password")
         private val DEPLOY_PASSWORD_ENCRYPTED = stringPreferencesKey("deploy_password_encrypted")
         private val DEPLOY_SSH_PORT = stringPreferencesKey("deploy_ssh_port")
+        private val DEPLOY_DNS1 = stringPreferencesKey("deploy_dns1")
+        private val DEPLOY_DNS2 = stringPreferencesKey("deploy_dns2")
         private val EXCLUDED_APPS = stringPreferencesKey("excluded_apps")
         
         private val DETAILED_LOGS = booleanPreferencesKey("detailed_logs")
@@ -80,6 +82,10 @@ class SettingsStore(context: Context) {
         private val IS_DYNAMIC_COLOR = booleanPreferencesKey("is_dynamic_color")
         private val THEME_PALETTE = stringPreferencesKey("theme_palette")
 
+        // ═══ Fingerprint & Client IDs ═══
+        private val SELECTED_FINGERPRINT = stringPreferencesKey("selected_fingerprint")
+        private val ACTIVE_CLIENT_IDS = stringPreferencesKey("active_client_ids")
+
         private val UPDATE_LAST_CHECK_AT = longPreferencesKey("update_last_check_at")
         private val UPDATE_LATEST_VERSION = stringPreferencesKey("update_latest_version")
         private val UPDATE_LAST_ERROR = stringPreferencesKey("update_last_error")
@@ -92,12 +98,14 @@ class SettingsStore(context: Context) {
         private val UPDATE_DIALOG_LAST_ACTION = stringPreferencesKey("update_dialog_last_action")
         private val UPDATE_DIALOG_LAST_ACTION_AT = longPreferencesKey("update_dialog_last_action_at")
 
+        private val CLIENT_ID_CHECK_RESULTS = stringPreferencesKey("client_id_check_results")
+
         private fun <T> getProfileKey(baseKey: Preferences.Key<T>, profile: Int): Preferences.Key<T> {
             if (profile == 0) return baseKey
             val newName = "${baseKey.name}_$profile"
             @Suppress("UNCHECKED_CAST")
             return when (baseKey) {
-                PEER, VK_HASHES, SECONDARY_VK_HASH, PROTOCOL, SNI, USER_AGENT, DEPLOY_IP, DEPLOY_LOGIN, DEPLOY_PASSWORD, DEPLOY_PASSWORD_ENCRYPTED, DEPLOY_SSH_PORT, EXCLUDED_APPS, CONNECTION_PASSWORD, CONNECTION_PASSWORD_ENCRYPTED, DEPLOY_MAIN_PASSWORD, DEPLOY_MAIN_PASSWORD_ENCRYPTED, DEPLOY_ADMIN_ID, DEPLOY_ADMIN_ID_ENCRYPTED, DEPLOY_BOT_TOKEN, DEPLOY_BOT_TOKEN_ENCRYPTED, PROXY_MODE, PROXY_HOST, CAPTCHA_MODE, CAPTCHA_SOLVE_METHOD, CAPTCHA_WBV_SOLVE_METHOD, WDTT_LINK -> stringPreferencesKey(newName) as Preferences.Key<T>
+                PEER, VK_HASHES, SECONDARY_VK_HASH, PROTOCOL, SNI, USER_AGENT, DEPLOY_IP, DEPLOY_LOGIN, DEPLOY_PASSWORD, DEPLOY_PASSWORD_ENCRYPTED, DEPLOY_SSH_PORT, DEPLOY_DNS1, DEPLOY_DNS2, EXCLUDED_APPS, CONNECTION_PASSWORD, CONNECTION_PASSWORD_ENCRYPTED, DEPLOY_MAIN_PASSWORD, DEPLOY_MAIN_PASSWORD_ENCRYPTED, DEPLOY_ADMIN_ID, DEPLOY_ADMIN_ID_ENCRYPTED, DEPLOY_BOT_TOKEN, DEPLOY_BOT_TOKEN_ENCRYPTED, PROXY_MODE, PROXY_HOST, CAPTCHA_MODE, CAPTCHA_SOLVE_METHOD, CAPTCHA_WBV_SOLVE_METHOD, WDTT_LINK, SELECTED_FINGERPRINT, ACTIVE_CLIENT_IDS -> stringPreferencesKey(newName) as Preferences.Key<T>
                 WORKERS_PER_HASH, LISTEN_PORT, SERVER_DTLS_PORT, SERVER_WG_PORT, PROXY_PORT -> intPreferencesKey(newName) as Preferences.Key<T>
                 MANUAL_PORTS_ENABLED, NO_DTLS, NO_DNS, IS_WHITELIST, WDTT_LINK_MODE -> booleanPreferencesKey(newName) as Preferences.Key<T>
                 else -> throw IllegalArgumentException("Unsupported key type: ${baseKey.name}")
@@ -191,6 +199,14 @@ class SettingsStore(context: Context) {
         val profile = prefs[ACTIVE_PROFILE] ?: 0
         prefs[getProfileKey(DEPLOY_SSH_PORT, profile)] ?: ""
     }
+    val deployDns1: Flow<String> = dataStore.data.map { prefs ->
+        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        prefs[getProfileKey(DEPLOY_DNS1, profile)] ?: "1.1.1.1"
+    }
+    val deployDns2: Flow<String> = dataStore.data.map { prefs ->
+        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        prefs[getProfileKey(DEPLOY_DNS2, profile)] ?: "1.0.0.1"
+    }
     val excludedApps: Flow<String> = dataStore.data.map { prefs ->
         val profile = prefs[ACTIVE_PROFILE] ?: 0
         prefs[getProfileKey(EXCLUDED_APPS, profile)] ?: ""
@@ -255,6 +271,19 @@ class SettingsStore(context: Context) {
     val isDynamicColor: Flow<Boolean> = dataStore.data.map { it[IS_DYNAMIC_COLOR] ?: (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) }
     val themePalette: Flow<String> = dataStore.data.map { it[THEME_PALETTE] ?: "indigo" }
 
+    // ═══ Fingerprint & Client IDs ═══
+    val selectedFingerprint: Flow<String> = dataStore.data.map { prefs ->
+        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        prefs[getProfileKey(SELECTED_FINGERPRINT, profile)] ?: "chrome"
+    }
+    val activeClientIds: Flow<String> = dataStore.data.map { prefs ->
+        val profile = prefs[ACTIVE_PROFILE] ?: 0
+        prefs[getProfileKey(ACTIVE_CLIENT_IDS, profile)] ?: "6287487,8202606"
+    }
+    val clientIdCheckResults: Flow<String> = dataStore.data.map { prefs ->
+        prefs[CLIENT_ID_CHECK_RESULTS] ?: "{}"
+    }
+
     val updateLastCheckAt: Flow<Long> = dataStore.data.map { it[UPDATE_LAST_CHECK_AT] ?: 0L }
     val updateLatestVersion: Flow<String> = dataStore.data.map { it[UPDATE_LATEST_VERSION] ?: "" }
     val updateLastError: Flow<String> = dataStore.data.map { it[UPDATE_LAST_ERROR] ?: "" }
@@ -282,6 +311,26 @@ class SettingsStore(context: Context) {
     suspend fun saveThemePalette(palette: String) {
         dataStore.edit { prefs ->
             prefs[THEME_PALETTE] = palette
+        }
+    }
+
+    suspend fun saveFingerprint(fingerprint: String) {
+        dataStore.edit { prefs ->
+            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            prefs[getProfileKey(SELECTED_FINGERPRINT, profile)] = fingerprint
+        }
+    }
+
+    suspend fun saveActiveClientIds(clientIds: String) {
+        dataStore.edit { prefs ->
+            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            prefs[getProfileKey(ACTIVE_CLIENT_IDS, profile)] = clientIds
+        }
+    }
+
+    suspend fun saveClientIdCheckResults(resultsJson: String) {
+        dataStore.edit { prefs ->
+            prefs[CLIENT_ID_CHECK_RESULTS] = resultsJson
         }
     }
 
@@ -399,13 +448,15 @@ class SettingsStore(context: Context) {
         }
     }
 
-    suspend fun saveDeploy(ip: String, login: String, pass: String, sshPort: String) {
+    suspend fun saveDeploy(ip: String, login: String, pass: String, sshPort: String, dns1: String, dns2: String) {
         dataStore.edit { prefs ->
             val profile = prefs[ACTIVE_PROFILE] ?: 0
             prefs[getProfileKey(DEPLOY_IP, profile)] = ip
             prefs[getProfileKey(DEPLOY_LOGIN, profile)] = login
             prefs.putSecret(DEPLOY_PASSWORD_ENCRYPTED, DEPLOY_PASSWORD, pass, profile)
             prefs[getProfileKey(DEPLOY_SSH_PORT, profile)] = sshPort
+            prefs[getProfileKey(DEPLOY_DNS1, profile)] = dns1
+            prefs[getProfileKey(DEPLOY_DNS2, profile)] = dns2
         }
     }
 

@@ -33,6 +33,8 @@ object TunnelManager {
     private var readerJob: Job? = null
     private var watchdogJob: Job? = null
     private var wgHelper: WireGuardHelper? = null
+    
+    private val startStopMutex = kotlinx.coroutines.sync.Mutex()
 
     // Error counters for circuit breaker
     private var floodCount = 0
@@ -64,6 +66,29 @@ object TunnelManager {
 
     fun clearUnreadErrors() {
         unreadErrorCount.value = 0
+    }
+
+    private var observersInitialized = false
+
+    fun initObservers(context: Context) {
+        if (observersInitialized) return
+        observersInitialized = true
+        val appContext = context.applicationContext
+        scope.launch {
+            running.collect { running ->
+                try {
+                    VpnWidgetProvider.updateAllWidgets(appContext)
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+                        android.service.quicksettings.TileService.requestListeningState(
+                            appContext,
+                            android.content.ComponentName(appContext, QuickToggleTileService::class.java)
+                        )
+                    }
+                } catch (e: Exception) {
+                    // Ignore
+                }
+            }
+        }
     }
 
     // Добавляем лог с Деплоя
@@ -108,33 +133,34 @@ object TunnelManager {
     }
 
     fun start(context: Context, params: TunnelParams, isSwitching: Boolean = false) {
-        if (running.value && !isSwitching) return
-        
-        val appContext = context.applicationContext // Защита от Memory Leak
-        
-        if (!isSwitching) {
-            clearLogs()
-            config.value = null
-            stats.value = "Ожидание данных..."
-            floodCount = 0
-            mismatchCount = 0
-            refusedCount = 0
-            currentHashErrorCount = 0
-            wrapAuthTimeoutCount = 0
-            processStartedAtMs = 0L
-            lastActiveAtMs = 0L
-            activeHashIndex = 0
-            currentParams = params
-            lastContext = appContext
-            forceRegenerateUA = false
-            currentCaptchaMode = params.captchaMode
-            currentCaptchaSolveMethod = params.captchaSolveMethod
-        }
-        
-        wgHelper = WireGuardHelper(appContext)
-
         scope.launch {
+            startStopMutex.lock()
             try {
+                if (running.value && !isSwitching) return@launch
+        
+                val appContext = context.applicationContext // Защита от Memory Leak
+                
+                if (!isSwitching) {
+                    clearLogs()
+                    config.value = null
+                    stats.value = "Ожидание данных..."
+                    floodCount = 0
+                    mismatchCount = 0
+                    refusedCount = 0
+                    currentHashErrorCount = 0
+                    wrapAuthTimeoutCount = 0
+                    processStartedAtMs = 0L
+                    lastActiveAtMs = 0L
+                    activeHashIndex = 0
+                    currentParams = params
+                    lastContext = appContext
+                    forceRegenerateUA = false
+                    currentCaptchaMode = params.captchaMode
+                    currentCaptchaSolveMethod = params.captchaSolveMethod
+                }
+                
+                wgHelper = WireGuardHelper(appContext)
+
                 val targetHash = if (activeHashIndex == 0) params.vkHashes else params.secondaryVkHash
                 
                 // Robust hash parsing: split by comma, newline, or whitespace
@@ -177,6 +203,16 @@ object TunnelManager {
                     "-listen", "127.0.0.1:${params.port}"
                 )
 
+                if (params.fingerprint.isNotEmpty()) {
+                    cmd.add("-fingerprint")
+                    cmd.add(params.fingerprint)
+                }
+
+                if (params.clientIds.isNotEmpty()) {
+                    cmd.add("-client-ids")
+                    cmd.add(params.clientIds)
+                }
+
                 val androidId = android.provider.Settings.Secure.getString(context.contentResolver, android.provider.Settings.Secure.ANDROID_ID) ?: "unknown"
                 cmd.add("-device-id")
                 cmd.add(androidId)
@@ -206,6 +242,8 @@ object TunnelManager {
                 updateLog("critical_start_error", "Критическая ошибка запуска: ${e.message}", 99, true)
                 e.printStackTrace()
                 running.value = false
+            } finally {
+                startStopMutex.unlock()
             }
         }
     }
@@ -491,7 +529,9 @@ object TunnelManager {
                     }
                 }
             } catch (e: Exception) {
-                updateLog("sys_error", "Процесс остановлен: ${e.message}", -1, true)
+                if (!e.message.toString().contains("read interrupted by close", ignoreCase = true)) {
+                    updateLog("sys_error", "Системная ошибка: ${e.message}", -1, true)
+                }
             } finally {
                 running.value = false
                 process = null
@@ -619,34 +659,38 @@ object TunnelManager {
     }
 
     fun stop() {
-        scope.launch(Dispatchers.Main) {
-            wgHelper?.stopTunnel()
+        scope.launch {
+            startStopMutex.lock()
+            try {
+                withContext(Dispatchers.Main) {
+                    wgHelper?.stopTunnel()
+                }
+                killProcess()
+                running.value = false
+                activeWorkers.value = 0
+                currentParams = null
+                ManlCaptchaWebViewManager.cancelCaptcha()
+            } finally {
+                startStopMutex.unlock()
+            }
         }
-        killProcess()
-        running.value = false
-        activeWorkers.value = 0
-        currentParams = null
-        ManlCaptchaWebViewManager.cancelCaptcha()
     }
 
     suspend fun stopAndWait() {
-        withContext(Dispatchers.Main) {
-            wgHelper?.stopTunnel()
-        }
-        withContext(Dispatchers.IO) {
-            killProcess()
-            running.value = false
-            activeWorkers.value = 0
-            currentParams = null
-            ManlCaptchaWebViewManager.cancelCaptcha()
-            repeat(30) {
-                try {
-                    java.net.ServerSocket(9000, 1, java.net.InetAddress.getByName("127.0.0.1")).use { it.close() }
-                    return@withContext
-                } catch (_: Exception) {
-                    delay(100)
-                }
+        startStopMutex.lock()
+        try {
+            withContext(Dispatchers.Main) {
+                wgHelper?.stopTunnel()
             }
+            withContext(Dispatchers.IO) {
+                killProcess()
+                running.value = false
+                activeWorkers.value = 0
+                currentParams = null
+                ManlCaptchaWebViewManager.cancelCaptcha()
+            }
+        } finally {
+            startStopMutex.unlock()
         }
     }
 
@@ -786,5 +830,7 @@ data class TunnelParams(
     val connectionPassword: String = "",
     val protocol: String = "udp",
     val captchaMode: String = "auto",
-    val captchaSolveMethod: String = "auto"
+    val captchaSolveMethod: String = "auto",
+    val fingerprint: String = "chrome",
+    val clientIds: String = "6287487,8202606"
 )

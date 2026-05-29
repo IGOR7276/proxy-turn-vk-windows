@@ -59,10 +59,10 @@ type WorkerSlot struct {
 type Dispatcher struct {
 	localConn  net.PacketConn
 	clientAddr atomic.Pointer[net.Addr]
-	mu         sync.Mutex
-	workers    []*WorkerSlot
+	workers    atomic.Pointer[[]*WorkerSlot]
+	mu         sync.Mutex // Используется только для записи
 	rrIndex    int
-	rrCount    int // сколько пакетов отправлено в текущий worker (0..chunkSize-1)
+	rrCount    int
 	ReturnCh   chan []byte
 	ctx        context.Context
 	cancel     context.CancelFunc
@@ -79,6 +79,9 @@ func NewDispatcher(ctx context.Context, localConn net.PacketConn, stats *Stats) 
 		cancel:    dcancel,
 		stats:     stats,
 	}
+	
+	empty := make([]*WorkerSlot, 0)
+	d.workers.Store(&empty)
 
 	d.wg.Add(2)
 	go d.readLoop()
@@ -93,28 +96,27 @@ func (d *Dispatcher) Shutdown() {
 
 func (d *Dispatcher) Register(w *WorkerSlot) {
 	d.mu.Lock()
-	d.workers = append(d.workers, w)
-	count := len(d.workers)
-	d.mu.Unlock()
-	log.Printf("[ДИСП] Воркер #%d зарегистрирован (всего: %d)", w.ID, count)
+	defer d.mu.Unlock()
+	oldWorkers := d.workers.Load()
+	newWorkers := make([]*WorkerSlot, len(*oldWorkers)+1)
+	copy(newWorkers, *oldWorkers)
+	newWorkers[len(*oldWorkers)] = w
+	d.workers.Store(&newWorkers)
+	log.Printf("[ДИСП] Воркер #%d зарегистрирован (всего: %d)", w.ID, len(newWorkers))
 }
 
 func (d *Dispatcher) Unregister(slot *WorkerSlot) {
 	d.mu.Lock()
-	for i, w := range d.workers {
-		if w == slot {
-			d.workers = append(d.workers[:i], d.workers[i+1:]...)
-			break
+	defer d.mu.Unlock()
+	oldWorkers := d.workers.Load()
+	newWorkers := make([]*WorkerSlot, 0, len(*oldWorkers))
+	for _, w := range *oldWorkers {
+		if w != slot {
+			newWorkers = append(newWorkers, w)
 		}
 	}
-	remaining := len(d.workers)
-	// Подстраховка: если текущий rrIndex вылез за границу после удаления
-	if d.rrIndex >= remaining && remaining > 0 {
-		d.rrIndex = d.rrIndex % remaining
-	}
-	d.rrCount = 0
-	d.mu.Unlock()
-	log.Printf("[ДИСП] Воркер #%d отключён (осталось: %d)", slot.ID, remaining)
+	d.workers.Store(&newWorkers)
+	log.Printf("[ДИСП] Воркер #%d отключён (осталось: %d)", slot.ID, len(newWorkers))
 }
 
 // readLoop читает WireGuard-пакеты и распределяет по workers chunk'ами.
@@ -128,40 +130,41 @@ func (d *Dispatcher) Unregister(slot *WorkerSlot) {
 func (d *Dispatcher) readLoop() {
 	defer d.wg.Done()
 
-	buf := make([]byte, readBufSize)
 	for {
 		if err := d.ctx.Err(); err != nil {
 			return
 		}
 
-		n, addr, err := d.localConn.ReadFrom(buf)
+		pkt := getPktBuf(2048)
+
+		n, addr, err := d.localConn.ReadFrom(pkt)
 		if err != nil {
+			putPktBuf(pkt)
 			if d.ctx.Err() != nil {
 				return
 			}
 			time.Sleep(10 * time.Millisecond)
 			continue
 		}
+		pkt = pkt[:n]
 
 		d.clientAddr.Store(&addr)
 		atomic.AddInt64(&d.stats.TotalBytesUp, int64(n))
 
-		pkt := getPktBuf(n)
-		copy(pkt, buf[:n])
-
-		d.mu.Lock()
-		nw := len(d.workers)
-		if nw == 0 {
-			d.mu.Unlock()
+		workersPtr := d.workers.Load()
+		if workersPtr == nil || len(*workersPtr) == 0 {
 			putPktBuf(pkt)
 			continue
 		}
+
+		ws := *workersPtr
+		nw := len(ws)
 
 		sent := false
 		idx := d.rrIndex % nw
 
 		// Пробуем текущий worker (chunk affinity)
-		w := d.workers[idx]
+		w := ws[idx]
 		select {
 		case w.SendCh <- pkt:
 			sent = true
@@ -175,7 +178,7 @@ func (d *Dispatcher) readLoop() {
 			for i := 1; i < nw; i++ {
 				altIdx := (idx + i) % nw
 				select {
-				case d.workers[altIdx].SendCh <- pkt:
+				case ws[altIdx].SendCh <- pkt:
 					sent = true
 					d.rrIndex = altIdx
 					d.rrCount = 1 // первый пакет нового chunk'а уже отправлен
@@ -193,7 +196,6 @@ func (d *Dispatcher) readLoop() {
 			d.rrCount = 0
 			putPktBuf(pkt)
 		}
-		d.mu.Unlock()
 	}
 }
 

@@ -156,9 +156,12 @@ class VpnWidgetProvider : AppWidgetProvider() {
             putExtra("workers_per_hash", store.workersPerHash.first())
             putExtra("port", localPort)
             putExtra("sni", store.sni.first())
-            putExtra("connection_password", password)
-            putExtra("captcha_mode", sanitizeCaptchaMode(store.captchaMode.first()))
+            putExtra("connection_password", store.connectionPassword.first())
+            putExtra("protocol", store.protocol.first())
+            putExtra("captcha_mode", store.captchaMode.first())
             putExtra("captcha_solve_method", store.captchaSolveMethod.first())
+            putExtra("fingerprint", store.selectedFingerprint.first())
+            putExtra("client_ids", store.activeClientIds.first())
         }
     }
 

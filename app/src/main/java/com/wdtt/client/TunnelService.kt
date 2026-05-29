@@ -71,7 +71,9 @@ class TunnelService : Service() {
                     connectionPassword = intent.getStringExtra("connection_password") ?: "",
                     protocol = intent.getStringExtra("protocol") ?: "udp",
                     captchaMode = sanitizeCaptchaMode(intent.getStringExtra("captcha_mode")),
-                    captchaSolveMethod = intent.getStringExtra("captcha_solve_method") ?: "auto"
+                    captchaSolveMethod = intent.getStringExtra("captcha_solve_method") ?: "auto",
+                    fingerprint = intent.getStringExtra("fingerprint") ?: "chrome",
+                    clientIds = intent.getStringExtra("client_ids") ?: "6287487,8202606"
                 )
                 startTunnel(params)
             }
@@ -118,7 +120,9 @@ class TunnelService : Service() {
                     sni = store.sni.first(),
                     connectionPassword = store.connectionPassword.first(),
                     captchaMode = sanitizeCaptchaMode(store.captchaMode.first()),
-                    captchaSolveMethod = store.captchaSolveMethod.first()
+                    captchaSolveMethod = store.captchaSolveMethod.first(),
+                    fingerprint = store.selectedFingerprint.first(),
+                    clientIds = store.activeClientIds.first()
                 )
                 if (params.peer.isNotEmpty() && params.vkHashes.isNotEmpty()) {
                     launch(Dispatchers.Main) {

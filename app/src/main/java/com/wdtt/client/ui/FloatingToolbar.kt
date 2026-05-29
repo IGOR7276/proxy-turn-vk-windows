@@ -12,6 +12,7 @@ import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -26,6 +27,9 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.wdtt.client.SettingsStore
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
@@ -38,6 +42,9 @@ import kotlin.math.roundToInt
 
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 
 @Composable
 fun FloatingToolbar(
@@ -49,6 +56,10 @@ fun FloatingToolbar(
     onDynamicColorChange: (Boolean) -> Unit,
     currentPalette: String,
     onPaletteChange: (String) -> Unit,
+    activeFingerprint: String,
+    onFingerprintChange: (String) -> Unit,
+    activeClientIds: String,
+    onClientIdsChange: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val configuration = LocalConfiguration.current
@@ -149,41 +160,44 @@ fun FloatingToolbar(
             }
         }
 
-        AnimatedVisibility(
-            visible = isExpanded,
-            enter = fadeIn(),
-            exit = fadeOut(),
-            modifier = Modifier.offset {
-                val panelWidthPx = with(density) { panelWidthDp.toPx() }
-                val gap = with(density) { 8.dp.toPx() }
-                val panelX = if (isRightSide) {
-                    (targetXPx - panelWidthPx - gap).roundToInt()
-                } else {
-                    (tabWidthPx + gap).roundToInt()
-                }
-                IntOffset(panelX, offsetY.roundToInt())
-            }
-        ) {
-            Surface(
-                modifier = Modifier.onGloballyPositioned { coordinates ->
-                    panelHeightPx = coordinates.size.height.toFloat()
-                },
-                shape = RoundedCornerShape(32.dp),
-                color = MaterialTheme.colorScheme.surface,
-                shadowElevation = 0.dp,
-                tonalElevation = 0.dp,
+        if (isExpanded) {
+            Dialog(
+                onDismissRequest = { isExpanded = false },
+                properties = DialogProperties(usePlatformDefaultWidth = false)
             ) {
-                Column(
-                    modifier = Modifier.padding(12.dp).width(panelWidthDp - 24.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                Surface(
+                    shape = RoundedCornerShape(32.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    shadowElevation = 8.dp,
+                    tonalElevation = 8.dp,
+                    modifier = Modifier.fillMaxWidth(0.9f)
                 ) {
-                    Text(
-                        "Профиль",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.padding(start = 4.dp, bottom = 4.dp)
-                    )
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "Настройки",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        IconButton(
+                            onClick = { isExpanded = false },
+                            modifier = Modifier.size(24.dp)
+                        ) {
+                            Icon(
+                                Icons.Filled.Close,
+                                contentDescription = "Close",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
 
                     Row(
                         modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
@@ -245,11 +259,6 @@ fun FloatingToolbar(
                         onClick = { onThemeChange("dark"); isExpanded = false }
                     )
 
-                    HorizontalDivider(
-                        modifier = Modifier.padding(vertical = 4.dp),
-                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
-                    )
-
                     val supportsDynamicColor = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
                     val showDynamicColorOn = isDynamicColor && supportsDynamicColor
                     val showPalettes = !showDynamicColorOn
@@ -300,11 +309,185 @@ fun FloatingToolbar(
                             Spacer(modifier = Modifier.height(6.dp))
                         }
                     }
+
+                    HorizontalDivider(
+                        modifier = Modifier.padding(vertical = 4.dp),
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                    )
+
+                    Text(
+                        "Отпечаток",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(start = 4.dp, bottom = 4.dp)
+                    )
+
+                    val fingerprints = listOf("chrome", "safari", "firefox")
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        fingerprints.forEach { fp ->
+                            val selected = fp == activeFingerprint
+                            Surface(
+                                onClick = { onFingerprintChange(fp) },
+                                shape = RoundedCornerShape(8.dp),
+                                color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Box(
+                                    modifier = Modifier.padding(vertical = 10.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    val fpName = when(fp) {
+                                        "chrome" -> "Chrome"
+                                        "safari" -> "Safari"
+                                        "firefox" -> "FireFox"
+                                        else -> fp.capitalize()
+                                    }
+                                    Text(
+                                        text = fpName,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                                        color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                                        fontSize = 11.sp
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    HorizontalDivider(
+                        modifier = Modifier.padding(vertical = 4.dp),
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                    )
+
+                    Text(
+                        "Client IDs",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(start = 4.dp, bottom = 4.dp)
+                    )
+
+                    val scope = rememberCoroutineScope()
+                    val clientIdsList = activeClientIds.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+                    
+                    val context = LocalContext.current
+                    val settingsStore = remember { SettingsStore(context) }
+                    val checkResultsJson by settingsStore.clientIdCheckResults.collectAsStateWithLifecycle(initialValue = "{}")
+                    
+                    var checkResults by remember(checkResultsJson) { 
+                        mutableStateOf(try {
+                            val json = org.json.JSONObject(checkResultsJson)
+                            val map = mutableMapOf<String, Boolean>()
+                            val keys = json.keys()
+                            while (keys.hasNext()) {
+                                val key = keys.next() as String
+                                map[key] = json.getBoolean(key)
+                            }
+                            map
+                        } catch (e: Exception) { emptyMap() })
+                    }
+
+                    var isChecking by remember { mutableStateOf(false) }
+
+                    val knownIds = listOf("6287487", "8202606")
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        knownIds.forEach { id ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Checkbox(
+                                        checked = clientIdsList.contains(id),
+                                        onCheckedChange = { checked ->
+                                            val newList = if (checked) {
+                                                if (!clientIdsList.contains(id)) clientIdsList + id else clientIdsList
+                                            } else {
+                                                clientIdsList - id
+                                            }
+                                            if (newList.isNotEmpty()) {
+                                                onClientIdsChange(newList.joinToString(","))
+                                            }
+                                        },
+                                        modifier = Modifier.scale(0.8f)
+                                    )
+                                    Text(
+                                        text = id,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                }
+                                if (checkResults.containsKey(id)) {
+                                    Text(
+                                        text = if (checkResults[id] == true) "✅" else "❌",
+                                        fontSize = 12.sp
+                                    )
+                                }
+                            }
+                        }
+                        
+                        Button(
+                            onClick = {
+                                isChecking = true
+                                scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                    val results = checkResults.toMutableMap()
+                                    knownIds.forEach { id ->
+                                        results[id] = checkVkClientId(id)
+                                    }
+                                    
+                                    val newJson = org.json.JSONObject()
+                                    results.forEach { (k, v) -> newJson.put(k, v) }
+                                    settingsStore.saveClientIdCheckResults(newJson.toString())
+                                    
+                                    isChecking = false
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp),
+                            enabled = !isChecking,
+                            contentPadding = PaddingValues(0.dp)
+                        ) {
+                            Text(if (isChecking) "Checking..." else "Проверить", fontSize = 12.sp)
+                        }
+                    }
                 }
             }
         }
     }
 }
+}
+
+private fun checkVkClientId(appId: String): Boolean {
+    for (i in 0..1) {
+        try {
+            val url = java.net.URL("https://oauth.vk.com/authorize?client_id=$appId&display=mobile&response_type=token")
+            val conn = url.openConnection() as java.net.HttpURLConnection
+            conn.requestMethod = "GET"
+            conn.connectTimeout = 5000
+            conn.readTimeout = 5000
+            
+            val code = conn.responseCode
+            val stream = if (code >= 400) conn.errorStream else conn.inputStream
+            val response = stream?.bufferedReader()?.readText() ?: ""
+            
+            // If it returns a json error like {"error":"invalid_client"...}
+            if (response.contains("\"error\"") && (response.contains("invalid_client") || response.contains("invalid_request"))) {
+                return false
+            }
+            // If it returns HTML (login form or captcha), it's a valid client ID
+            return true
+        } catch (e: Exception) {
+            // Error, will retry
+        }
+    }
+    return false
+}
+
+
 
 @Composable
 private fun ThemeOption(
