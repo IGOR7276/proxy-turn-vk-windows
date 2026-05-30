@@ -348,21 +348,25 @@ func startUI(listenAddr string) {
 		}
 	})
 
-	// Определяем свободный порт
-	listener, err := net.Listen("tcp", listenAddr)
+	// Определяем свободный порт (локальный, только IPv4)
+	if listenAddr == ":0" || listenAddr == ":" {
+		listenAddr = "127.0.0.1:0"
+	}
+	listener, err := net.Listen("tcp4", listenAddr)
 	if err != nil {
 		log.Fatalf("[UI] Не удалось запустить сервер: %v", err)
 	}
-	addr := listener.Addr().String()
+	_, port, _ := net.SplitHostPort(listener.Addr().String())
+	displayAddr := "localhost:" + port
 
 	fmt.Println()
 	fmt.Println("╔══════════════════════════════════════════════╗")
 	fmt.Println("║        WDTT VPN Web Interface               ║")
 	fmt.Println("╠══════════════════════════════════════════════╣")
-	fmt.Printf("║  Открой в браузере: http://%s        ║\n", addr)
+	fmt.Printf("║  Открой в браузере: http://%-30s ║\n", displayAddr)
 	fmt.Println("╚══════════════════════════════════════════════╝")
 	fmt.Println()
 
-	log.Printf("[UI] Web интерфейс запущен на http://%s", addr)
+	log.Printf("[UI] Web интерфейс запущен на http://%s", displayAddr)
 	log.Fatal(http.Serve(listener, mux))
 }
