@@ -15,7 +15,7 @@
 2. Запустить консоль **от имени администратора**: `wdtt-pc.exe -ui`
 3. Открыть `http://localhost:XXXXX` (порт в консоли), заполнить профиль, подключиться
 
-Или CLI: `wdtt-pc.exe -peer IP:56000 -vk HASH -password PASS -n 36 -windows-wg`
+Или CLI: `wdtt-pc.exe -peer IP:56000 -vk HASH -password PASS -n 16 -windows-wg`
 
 ## VK-хеш
 
