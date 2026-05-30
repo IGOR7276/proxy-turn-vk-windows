@@ -51,3 +51,10 @@ Desktop.ini
 *.bak
 msg.txt
 *.bat
+
+# ===== Go Client Build =====
+go_client/wdtt-client.exe
+go_client/wg-turn.conf
+go_client/vpn_profiles.json
+wg-turn.conf
+ui_test_*.txt

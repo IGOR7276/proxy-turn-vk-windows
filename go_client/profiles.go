@@ -2,8 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"math/rand"
 	"os"
+	"path/filepath"
+	"sync"
 )
 
 // Profile holds consistent browser fingerprint headers for TLS+HTTP requests.
@@ -151,4 +154,107 @@ func getRandomProfile() Profile {
 		// chrome, or unknown, pick from first few chrome profiles
 		return profileList[rand.Intn(3)]
 	}
+}
+
+// --- VPN Profile Management (Web UI) ---
+
+type VPNProfile struct {
+	Name         string `json:"Name"`
+	Peer         string `json:"Peer"`
+	VkHash       string `json:"VkHash"`
+	Password     string `json:"Password"`
+	NumWorkers   int    `json:"NumWorkers"`
+	ClientIds    string `json:"ClientIds"`
+	Fingerprint  string `json:"Fingerprint"`
+	CaptchaMode  string `json:"CaptchaMode"`
+	UseWindowsWG bool   `json:"UseWindowsWG"`
+	WGInterface  string `json:"WGInterface"`
+	DeviceId     string `json:"DeviceId"`
+	AutoConnect  bool   `json:"AutoConnect"`
+}
+
+var (
+	vpnProfileMu   sync.Mutex
+	vpnProfilePath string
+	vpnProfileOnce sync.Once
+)
+
+func getVPNProfilePath() string {
+	vpnProfileOnce.Do(func() {
+		exe, err := os.Executable()
+		if err != nil {
+			vpnProfilePath = "vpn_profiles.json"
+			return
+		}
+		vpnProfilePath = filepath.Join(filepath.Dir(exe), "vpn_profiles.json")
+	})
+	return vpnProfilePath
+}
+
+func loadProfilesFromFile() ([]VPNProfile, error) {
+	vpnProfileMu.Lock()
+	defer vpnProfileMu.Unlock()
+
+	path := getVPNProfilePath()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []VPNProfile{}, nil
+		}
+		return nil, err
+	}
+
+	var profiles []VPNProfile
+	if err := json.Unmarshal(data, &profiles); err != nil {
+		return nil, err
+	}
+	if profiles == nil {
+		return []VPNProfile{}, nil
+	}
+	return profiles, nil
+}
+
+func saveProfilesToFile(profiles []VPNProfile) error {
+	path := getVPNProfilePath()
+	data, err := json.MarshalIndent(profiles, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0600)
+}
+
+func saveProfile(p *VPNProfile) error {
+	profiles, err := loadProfilesFromFile()
+	if err != nil {
+		return fmt.Errorf("load profiles: %w", err)
+	}
+
+	found := false
+	for i, existing := range profiles {
+		if existing.Name == p.Name {
+			profiles[i] = *p
+			found = true
+			break
+		}
+	}
+	if !found {
+		profiles = append(profiles, *p)
+	}
+
+	return saveProfilesToFile(profiles)
+}
+
+func deleteProfile(name string) error {
+	profiles, err := loadProfilesFromFile()
+	if err != nil {
+		return err
+	}
+
+	for i, pr := range profiles {
+		if pr.Name == name {
+			profiles = append(profiles[:i], profiles[i+1:]...)
+			return saveProfilesToFile(profiles)
+		}
+	}
+	return fmt.Errorf("profile not found: %s", name)
 }

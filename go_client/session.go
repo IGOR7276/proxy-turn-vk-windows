@@ -20,7 +20,7 @@ import (
 
 const (
 	workerSendBuf      = 128
-	sessionReadTimeout = 30 * time.Minute // Increased from 60s to 30min
+	sessionReadTimeout = 2 * time.Minute
 	readBufSize        = 1600
 	socketBufSize      = 625 * 1024
 	keepaliveByte      = 0xFF // DTLS-level keepalive marker
@@ -71,75 +71,101 @@ func RunSession(
 	if len(creds.TurnURLs) == 0 {
 		return false, fmt.Errorf("нет TURN URL в учетных данных")
 	}
-	selectedURL := creds.TurnURLs[sessionID%len(creds.TurnURLs)]
 
-	urlhost, urlport, err := net.SplitHostPort(selectedURL)
-	if err != nil {
-		return false, fmt.Errorf("разбор TURN URL %q: %w", selectedURL, err)
-	}
-	if tp.Host != "" {
-		urlhost = tp.Host
-	}
-	if tp.Port != "" {
-		urlport = tp.Port
-	}
-	turnAddr := net.JoinHostPort(urlhost, urlport)
+	var (
+		turnErr     error
+		tc          *turn.Client
+		relay       net.PacketConn
+		turnConn    net.PacketConn
+		turnAddress string
+	)
 
-	// Транспорт: всегда UDP
-	resolved, err := net.ResolveUDPAddr("udp", turnAddr)
-	if err != nil {
-		return false, fmt.Errorf("резолв TURN: %w", err)
-	}
-	c, err := net.DialUDP("udp", nil, resolved)
-	if err != nil {
-		return false, fmt.Errorf("подключение TURN UDP: %w", err)
-	}
-	defer c.Close()
-	_ = c.SetReadBuffer(socketBufSize)
-	_ = c.SetWriteBuffer(socketBufSize)
-	var turnConn net.PacketConn = &connectedUDPConn{c}
-
-	log.Printf("[СЕССИЯ #%d] TURN UDP (%s)", sessionID, turnAddr)
-
-	// RequestedAddressFamily
-	var addrFamily turn.RequestedAddressFamily
-	if peer.IP.To4() != nil {
-		addrFamily = turn.RequestedAddressFamilyIPv4
-	} else {
-		addrFamily = turn.RequestedAddressFamilyIPv6
-	}
-
-	// TURN Client (pion/turn/v5)
-	tc, err := turn.NewClient(&turn.ClientConfig{
-		STUNServerAddr:         turnAddr,
-		TURNServerAddr:         turnAddr,
-		Conn:                   turnConn,
-		Username:               creds.User,
-		Password:               creds.Pass,
-		RequestedAddressFamily: addrFamily,
-		LoggerFactory:          &NullLoggerFactory{},
-	})
-	if err != nil {
-		return false, fmt.Errorf("TURN клиент: %w", err)
-	}
-	defer tc.Close()
-
-	if err = tc.Listen(); err != nil {
-		return false, fmt.Errorf("TURN Listen: %w", err)
-	}
-
-	relay, err := tc.Allocate()
-	if err != nil {
-		if isAuthError(err) {
-			handleAuthError(creds.CacheStreamID)
+	for _, candidate := range creds.TurnURLs {
+		selectedURL := candidate
+		urlhost, urlport, err := net.SplitHostPort(selectedURL)
+		if err != nil {
+			turnErr = err
+			continue
 		}
-		errStr := err.Error()
-		if strings.Contains(errStr, "Quota") || strings.Contains(errStr, "486") {
-			return false, fmt.Errorf("TURN квота: %w", err)
+		if tp.Host != "" {
+			urlhost = tp.Host
 		}
-		return false, fmt.Errorf("TURN Allocate: %w", err)
+		if tp.Port != "" {
+			urlport = tp.Port
+		}
+		turnAddress = net.JoinHostPort(urlhost, urlport)
+
+		resolved, err := net.ResolveUDPAddr("udp", turnAddress)
+		if err != nil {
+			turnErr = err
+			continue
+		}
+		c, err := net.DialUDP("udp", nil, resolved)
+		if err != nil {
+			turnErr = err
+			continue
+		}
+		_ = c.SetReadBuffer(socketBufSize)
+		_ = c.SetWriteBuffer(socketBufSize)
+		turnConn = &connectedUDPConn{c}
+
+		log.Printf("[СЕССИЯ #%d] TURN UDP (%s)", sessionID, turnAddress)
+
+		var addrFamily turn.RequestedAddressFamily
+		if peer.IP.To4() != nil {
+			addrFamily = turn.RequestedAddressFamilyIPv4
+		} else {
+			addrFamily = turn.RequestedAddressFamilyIPv6
+		}
+
+		tc, err = turn.NewClient(&turn.ClientConfig{
+			STUNServerAddr:         turnAddress,
+			TURNServerAddr:         turnAddress,
+			Conn:                   turnConn,
+			Username:               creds.User,
+			Password:               creds.Pass,
+			RequestedAddressFamily: addrFamily,
+			LoggerFactory:          &NullLoggerFactory{},
+		})
+		if err != nil {
+			_ = c.Close()
+			turnErr = err
+			continue
+		}
+
+		if err = tc.Listen(); err != nil {
+			tc.Close()
+			_ = c.Close()
+			turnErr = err
+			continue
+		}
+
+		relay, err = tc.Allocate()
+		if err != nil {
+			tc.Close()
+			_ = c.Close()
+			if isAuthError(err) {
+				handleAuthError(creds.CacheStreamID)
+			}
+			errStr := err.Error()
+			if strings.Contains(errStr, "Quota") || strings.Contains(errStr, "486") {
+				return false, fmt.Errorf("TURN квота: %w", err)
+			}
+			turnErr = err
+			continue
+		}
+
+		break
+	}
+
+	if relay == nil {
+		if turnErr == nil {
+			return false, fmt.Errorf("TURN Allocate: no TURN urls available")
+		}
+		return false, fmt.Errorf("TURN connection failed: %w", turnErr)
 	}
 	defer relay.Close()
+	defer tc.Close()
 
 	// Reset error count on successful allocation
 	getStreamCache(creds.CacheStreamID).errorCount.Store(0)
@@ -164,7 +190,11 @@ func RunSession(
 			case <-sessCtx.Done():
 				return
 			case <-t.C:
-				tc.SendBindingRequest()
+				if _, err := tc.SendBindingRequest(); err != nil {
+					log.Printf("[СЕССИЯ #%d] TURN binding failed: %v, closing session", sessionID, err)
+					sessCancel()
+					return
+				}
 			}
 		}
 	}()
@@ -200,6 +230,9 @@ func RunSession(
 		for {
 			n, _, readErr := relay.ReadFrom(buf)
 			if readErr != nil {
+				if sessCtx.Err() == nil {
+					log.Printf("[ВОРКЕР #%d] Ошибка relay.ReadFrom(): %v", sessionID, readErr)
+				}
 				return
 			}
 			payload := buf[:n]
@@ -243,6 +276,9 @@ func RunSession(
 				}
 			}
 			if _, writeErr := relay.WriteTo(out, peer); writeErr != nil {
+				if sessCtx.Err() == nil {
+					log.Printf("[ВОРКЕР #%d] Ошибка relay.WriteTo(): %v", sessionID, writeErr)
+				}
 				return
 			}
 		}
@@ -277,7 +313,7 @@ func RunSession(
 	}
 	defer dtlsConn.Close()
 
-	hctx, hcancel := context.WithTimeout(sessCtx, 20*time.Second)
+	hctx, hcancel := context.WithTimeout(sessCtx, 30*time.Second)
 	log.Printf("[ВОРКЕР #%d] [DTLS] Рукопожатие (Handshake)...", sessionID)
 	err = dtlsConn.HandshakeContext(hctx)
 	hcancel()
@@ -287,6 +323,7 @@ func RunSession(
 		if useWrap {
 			errStr := strings.ToLower(err.Error())
 			if strings.Contains(errStr, "deadline") || strings.Contains(errStr, "timeout") {
+				log.Printf("[ВОРКЕР #%d] [DTLS] Таймаут хендшейка (30s) с WRAP, пароль/WRAP не подтверждён", sessionID)
 				return false, fmt.Errorf("WRAP_AUTH_TIMEOUT: DTLS timeout, пароль/WRAP не подтверждён")
 			}
 		}
@@ -352,6 +389,8 @@ func RunSession(
 			case <-t.C:
 				_ = dtlsConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 				if _, err := dtlsConn.Write(ping); err != nil {
+					log.Printf("[ВОРКЕР #%d] Keepalive write failed: %v, closing session", sessionID, err)
+					sessCancel()
 					return
 				}
 			}

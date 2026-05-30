@@ -71,6 +71,14 @@ func WorkerGroup(
 	var creds *Credentials
 	if err == nil {
 		creds = &Credentials{User: user, Pass: pass, TurnURLs: turnURLs, CacheStreamID: credStreamID}
+
+		// Регистрируем TURN IP-адреса для исключения из WG-маршрутизации
+		for _, url := range creds.TurnURLs {
+			host, _, err := net.SplitHostPort(strings.TrimPrefix(url, "turn://"))
+			if err == nil && host != "" {
+				AddTurnExcludeIP(host)
+			}
+		}
 	} else {
 		log.Printf("[ГРУППА #%d] Ошибка кредов: %v", groupID, err)
 		return

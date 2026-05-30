@@ -132,9 +132,19 @@ func main() {
 	captchaMode := flag.String("captcha-mode", "auto", "режим обхода капчи (auto/wv/rjs)")
 	fingerprint := flag.String("fingerprint", "chrome", "браузерный фингерпринт (chrome, safari, ios, android, firefox)")
 	clientIdsFlag := flag.String("client-ids", "", "ID клиентов VK через запятую")
+	wgInterface := flag.String("wg-interface", "WDTT", "имя WireGuard интерфейса на Windows")
+	autoWG := flag.Bool("windows-wg", false, "поднять WireGuard интерфейс на Windows")
+	uiMode := flag.Bool("ui", false, "запустить веб-интерфейс")
+	uiPort := flag.String("ui-port", ":0", "адрес веб-интерфейса (по умолчанию :0 = случайный порт)")
 
 	flag.Parse()
 	activeCaptchaMode := setCaptchaMode(*captchaMode)
+
+	// Веб-интерфейс
+	if *uiMode {
+		startUI(*uiPort)
+		return
+	}
 
 	if *peerAddr == "" || *vkHash == "" {
 		log.Fatal("[КЛИЕНТ] Нужны -peer и -vk")
@@ -295,6 +305,13 @@ func main() {
 				log.Printf("[КОНФИГ] Ошибка сохранения: %v", err)
 			} else {
 				log.Println("[КОНФИГ] Сохранён в wg-turn.conf")
+			}
+			if *autoWG {
+				if err := SetupWindowsWireGuard(finalConf, *wgInterface); err != nil {
+					log.Printf("[WG] Ошибка поднятия Windows WireGuard: %v", err)
+				} else {
+					log.Printf("[WG] Windows WireGuard интерфейс %s поднят", *wgInterface)
+				}
 			}
 		case <-ctx.Done():
 		}
