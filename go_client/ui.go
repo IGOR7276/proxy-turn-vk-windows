@@ -14,10 +14,17 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/sys/windows"
 )
 
 //go:embed ui/index.html
 var uiHTML string
+
+type logEntry struct {
+	ID   int64
+	Text string
+}
 
 var (
 	vpnCmd     *exec.Cmd
@@ -25,10 +32,10 @@ var (
 	vpnMu      sync.Mutex
 	vpnStart   time.Time
 
-	logRing  []string
+	logRing  []logEntry
 	logMu    sync.RWMutex
 	logMax   = 2000
-	logIndex int64
+	logNextID int64
 
 	activeConns int32
 	trafficMB   float64
@@ -38,22 +45,32 @@ var (
 func addLogLine(line string) {
 	logMu.Lock()
 	defer logMu.Unlock()
-	logRing = append(logRing, line)
+	logRing = append(logRing, logEntry{ID: logNextID, Text: line})
+	logNextID++
 	if len(logRing) > logMax {
 		logRing = logRing[len(logRing)-logMax:]
 	}
 }
 
-func getRecentLogs(since int64) []string {
+func getRecentLogs(since int64) ([]string, int64) {
 	logMu.RLock()
 	defer logMu.RUnlock()
 	start := 0
-	if since > 0 && since < int64(len(logRing)) {
-		start = int(since)
+	for i, e := range logRing {
+		if e.ID > since {
+			start = i
+			break
+		}
 	}
 	result := make([]string, len(logRing)-start)
-	copy(result, logRing[start:])
-	return result
+	for i := start; i < len(logRing); i++ {
+		result[i-start] = logRing[i].Text
+	}
+	lastID := int64(0)
+	if len(logRing) > 0 {
+		lastID = logRing[len(logRing)-1].ID
+	}
+	return result, lastID
 }
 
 func parseStatLine(line string) {
@@ -168,6 +185,10 @@ func startVPN(p map[string]interface{}) error {
 		return fmt.Errorf("VPN уже запущен")
 	}
 
+	if wg, _ := p["UseWindowsWG"].(bool); wg && !isElevated() {
+		return fmt.Errorf("WireGuard (Windows-WG) требует прав администратора. Перезапустите программу от имени администратора")
+	}
+
 	args := buildArgs(p)
 	exe, _ := os.Executable()
 	cmd := exec.Command(exe, args...)
@@ -231,7 +252,28 @@ func stopVPN() error {
 	return nil
 }
 
+func isElevated() bool {
+	var token windows.Token
+	err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_QUERY, &token)
+	if err != nil {
+		return false
+	}
+	defer token.Close()
+	return token.IsElevated()
+}
+
 func startUI(listenAddr string) {
+	if !isElevated() {
+		fmt.Println()
+		fmt.Println("╔══════════════════════════════════════════════════════════════╗")
+		fmt.Println("║  ВНИМАНИЕ: Запустите от имени Администратора!             ║")
+		fmt.Println("║                                                           ║")
+		fmt.Println("║  Для работы WireGuard (Windows-WG) требуются права        ║")
+		fmt.Println("║  администратора при первом запуске.                       ║")
+		fmt.Println("║  Перезапустите программу от имени администратора.         ║")
+		fmt.Println("╚══════════════════════════════════════════════════════════════╝")
+		fmt.Println()
+	}
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -300,9 +342,13 @@ func startUI(listenAddr string) {
 		if sinceStr != "" {
 			since, _ = strconv.ParseInt(sinceStr, 10, 64)
 		}
-		lines := getRecentLogs(since)
+		lines, lastID := getRecentLogs(since)
+		resp := map[string]interface{}{
+			"lines":   lines,
+			"lastId":  lastID,
+		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(lines)
+		json.NewEncoder(w).Encode(resp)
 	})
 
 	mux.HandleFunc("/api/profiles", func(w http.ResponseWriter, r *http.Request) {

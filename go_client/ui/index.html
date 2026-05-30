@@ -164,7 +164,9 @@ Windows WireGuard интерфейс (-windows-wg)
 let profiles=[];
 let startTime=null;
 let statusInterval=null;
-let logFetchSince="";
+let logPollTimer=null;
+let logPollActive=false;
+let lastLogID=-1;
 async function api(method,url,body){
 const opts={method,headers:{}};
 if(body){opts.headers['Content-Type']='application/json';opts.body=JSON.stringify(body)}
@@ -261,14 +263,15 @@ pollLogs();
 }catch(e){setMsg('Ошибка: '+e.message,'error');setBusy(false)}
 }
 async function disconnect(){
-try{
-await api('POST','/api/stop');
-setMsg('Отключено','success');
-setBusy(false);
-startTime=null;
-if(statusInterval){clearInterval(statusInterval);statusInterval=null}
-updateStatBadge()
-}catch(e){setMsg('Ошибка: '+e.message,'error')}
+    try{
+        await api('POST','/api/stop');
+        setMsg('Отключено','success');
+        setBusy(false);
+        startTime=null;
+        if(statusInterval){clearInterval(statusInterval);statusInterval=null}
+        logPollActive=false;
+        if(logPollTimer){clearTimeout(logPollTimer);logPollTimer=null}
+    }catch(e){setMsg('Ошибка: '+e.message,'error')}
 }
 function setBusy(running){
 document.getElementById('btnConnect').disabled=running;
@@ -304,14 +307,15 @@ if(!statusInterval)statusInterval=setTimeout(pollStatus,5000)
 }catch(e){setTimeout(pollStatus,5000)}
 }
 async function pollLogs(){
-try{
-const lines=await api('GET','/api/logs');
-if(lines&&Array.isArray(lines)){
-lines.forEach(l=>log(l));
-if(lines.length>0)logFetchSince=lines[lines.length-1]
-}
-}catch(e){}
-setTimeout(pollLogs,1000)
+    logPollActive=true;
+    try{
+        const r=await api('GET','/api/logs?since='+lastLogID);
+        if(r&&r.lines&&Array.isArray(r.lines)&&r.lines.length>0){
+            r.lines.forEach(l=>log(l));
+            if(r.lastId>lastLogID)lastLogID=r.lastId
+        }
+    }catch(e){}
+    if(logPollActive)logPollTimer=setTimeout(pollLogs,1000)
 }
 function showTab(name,btn){
 document.querySelectorAll('.tabs button').forEach(b=>b.classList.remove('active'));
