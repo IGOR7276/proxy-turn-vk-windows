@@ -12,10 +12,10 @@
 ## Установка
 
 1. Скачать `wdtt-pc-v1.0.1-with-wintun.zip` и распоковать в любую удобную папку
-2. Запустить консоль **от имени администратора**: `cd C:\Users\user\Downloads\wdtt-pc`  `wdtt-pc.exe -ui` 
+2. Запустить консоль **от имени администратора**: `cd C:\Users\user\Downloads\wdtt-pc`  `.\wdtt-pc.exe -ui` 
 3. Открыть `http://localhost:XXXXX` (порт в консоли), заполнить профиль, подключиться
 
-Или CLI: `cd C:\Users\user\Downloads\wdtt-pc` `wdtt-pc.exe -peer IP:56000 -vk HASH -password PASS -n 16 -windows-wg`
+Или CLI: `cd C:\Users\user\Downloads\wdtt-pc` `.\wdtt-pc.exe -peer IP:56000 -vk HASH -password PASS -n 16 -windows-wg`
 
 ## VK-хеш
 
