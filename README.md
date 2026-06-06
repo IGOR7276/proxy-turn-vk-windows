@@ -2,7 +2,7 @@
 
 Нативный Windows-клиент туннеля через VK TURN на базе WireGuard.
 
-Форк [amurcanov/proxy-turn-vk-android](https://github.com/amurcanov/proxy-turn-vk-android)  с полностью переписанным десктопным UI на Wails (Go + React).
+Форк https://github.com/amurcanov/proxy-turn-vk-android  с полностью переписанным десктопным UI на Wails
 
 ## Возможности
 
@@ -22,7 +22,7 @@
 
 ## Запуск
 
-Скачать из релиза и запустить от администратора.
+Скачать из релиза, распоквать, запустить wdtt от имени админгистратора
 
 ## Сборка из исходников
 
