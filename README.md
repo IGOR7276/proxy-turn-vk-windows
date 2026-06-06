@@ -13,10 +13,6 @@
 - **Настройки** — DNS-прокси, AutoWG, MTU, поведение, тема
 - **Инфо** — версия, статистика сессии, ссылки
 
-### Сборка
-- `wails build` (полная) — встраивает иконку и манифест
-- `wails build -nopackage` — быстрая dev-сборка без иконки
-
 ## Требования
 
 - Windows 10/11 x64
@@ -38,7 +34,7 @@ go install github.com/wailsapp/wails/v2/cmd/wails@latest
 git clone https://github.com/IGOR7276/proxy-turn-vk-windows.git
 cd proxy-turn-vk-windows
 
-# Сборка фронта + бинарь
+# Сборка 
 wails build
 ```
 
