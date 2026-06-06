@@ -4,6 +4,7 @@
 package core
 
 import (
+	_ "embed"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
@@ -16,11 +17,36 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/tun"
 )
+
+// wintunEmbedded — встроенный wintun.dll (signed by WireGuard LLC, 0.14.1 amd64).
+// Извлекается в `%LOCALAPPDATA%\wdtt\wintun.dll` при первом старте, чтобы
+// пользователю не нужно было таскать DLL рядом с exe.
+// Источник: client/core/assets/wintun.dll (427552 байт, SHA256 в комментарии
+// рядом — обновлять при замене файла).
+//
+//go:embed assets/wintun.dll
+var wintunEmbedded []byte
+
+// hideWindow скрывает консольное окно при запуске дочерних процессов.
+// CREATE_NO_WINDOW (0x08000000) не создаёт консоль для процесса, HideWindow
+// скрывает окно если родитель Wails уже скрыл свою. Двойная защита от
+// мелькающих чёрных окон cmd/powershell при старте туннеля.
+const createNoWindow = 0x08000000
+
+func hiddenCmd(name string, args ...string) *exec.Cmd {
+	cmd := exec.Command(name, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		HideWindow:    true,
+		CreationFlags: createNoWindow,
+	}
+	return cmd
+}
 
 type wgConfig struct {
 	privateKey              string
@@ -67,7 +93,7 @@ func SetupWindowsWireGuard(rawConf, ifaceName string, customDNS []string) error 
 	}
 
 	if cfg.mtu <= 0 {
-		cfg.mtu = 1280
+		cfg.mtu = 1380
 	}
 
 	exePath, err := os.Executable()
@@ -197,7 +223,7 @@ func SetupWindowsWireGuard(rawConf, ifaceName string, customDNS []string) error 
 				delete(originalDNSByIf, iface)
 			}
 			dnsProxyMu.Unlock()
-			_ = exec.Command("ipconfig", "/flushdns").Run()
+			_ = hiddenCmd("ipconfig", "/flushdns").Run()
 
 			wgDev.Close()
 			// Сначала убираем exclude-маршруты, чтобы вернуть трафик в норму,
@@ -240,7 +266,7 @@ func SetupWindowsWireGuard(rawConf, ifaceName string, customDNS []string) error 
 				}
 			}
 			// Сбрасываем кэш, чтобы новые запросы пошли сразу через прокси.
-			_ = exec.Command("ipconfig", "/flushdns").Run()
+			_ = hiddenCmd("ipconfig", "/flushdns").Run()
 		}
 	}
 
@@ -349,7 +375,7 @@ func setWindowsInterfaceDNS(iface, dns string) error {
 // getInterfaceDNS читает текущий список DNS-серверов интерфейса через netsh.
 // Возвращает nil, если DNS назначен через DHCP (пусто) или не удалось распарсить.
 func getInterfaceDNS(iface string) []string {
-	out, err := exec.Command("netsh", "interface", "ipv4", "show", "dnsservers", fmt.Sprintf("name=%s", iface)).Output()
+	out, err := hiddenCmd("netsh", "interface", "ipv4", "show", "dnsservers", fmt.Sprintf("name=%s", iface)).Output()
 	if err != nil {
 		return nil
 	}
@@ -421,7 +447,7 @@ func getDefaultGateway() (gateway string, ifaceName string) {
 }
 
 func getDefaultGatewayPS() (gateway string, ifaceName string) {
-	cmd := exec.Command("powershell", "-NoProfile", "-Command",
+	cmd := hiddenCmd("powershell", "-NoProfile", "-Command",
 		"$r=Get-NetRoute -DestinationPrefix '0.0.0.0/0'|Select-Object -First 1; if($r){[string]$r.NextHop+'|'+$r.InterfaceAlias}")
 	out, err := cmd.Output()
 	if err != nil {
@@ -437,7 +463,7 @@ func getDefaultGatewayPS() (gateway string, ifaceName string) {
 }
 
 func getDefaultGatewayRoutePrint() (gateway string, ifaceName string) {
-	out, err := exec.Command("route", "print", "0.0.0.0").Output()
+	out, err := hiddenCmd("route", "print", "0.0.0.0").Output()
 	if err != nil {
 		return "", ""
 	}
@@ -460,7 +486,7 @@ func getDefaultGatewayRoutePrint() (gateway string, ifaceName string) {
 
 // findInterfaceNameByIP ищет имя Windows-интерфейса по его IP-адресу.
 func findInterfaceNameByIP(ipStr string) string {
-	out, err := exec.Command("powershell", "-NoProfile", "-Command",
+	out, err := hiddenCmd("powershell", "-NoProfile", "-Command",
 		"$ip='"+ipStr+"'; $adapter=Get-NetIPAddress -AddressFamily IPv4|Where-Object{$_.IPAddress -eq $ip}|Select-Object -First 1; if($adapter){$adapter.InterfaceAlias}").Output()
 	if err != nil {
 		return ""
@@ -471,7 +497,7 @@ func findInterfaceNameByIP(ipStr string) string {
 // getInterfaceDefaultGateway получает шлюз по умолчанию для указанного интерфейса.
 // Используется если getDefaultGateway вернул пустой шлюз но имя интерфейса известно.
 func getInterfaceGateway(ifaceName string) string {
-	cmd := exec.Command("powershell", "-NoProfile", "-Command",
+	cmd := hiddenCmd("powershell", "-NoProfile", "-Command",
 		"Get-NetRoute -DestinationPrefix '0.0.0.0/0' -InterfaceAlias '"+ifaceName+"'|Select-Object -First 1|ForEach-Object{[string]$_.NextHop}")
 	out, err := cmd.Output()
 	if err != nil {
@@ -491,7 +517,7 @@ func addHostRoute(iface, gateway, targetIP string) error {
 }
 
 func runNetsh(args ...string) error {
-	cmd := exec.Command("netsh", args...)
+	cmd := hiddenCmd("netsh", args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("netsh %v failed: %w; output=%s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
@@ -506,7 +532,7 @@ func runNetsh(args ...string) error {
 //   - не падает на длинных route-таблицах
 // Возвращает true если маршрут успешно добавлен.
 func runRouteAdd(cidr, gateway string) bool {
-	cmd := exec.Command("route", "add", cidr, gateway, "metric", "1")
+	cmd := hiddenCmd("route", "add", cidr, gateway, "metric", "1")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		log.Printf("[EXCL] route add %s via %s: %v — %s", cidr, gateway, err, strings.TrimSpace(string(out)))
 		return false
@@ -517,7 +543,7 @@ func runRouteAdd(cidr, gateway string) bool {
 // runRouteDelete удаляет ранее добавленный маршрут. Ошибки игнорируются
 // (маршрут мог быть удалён вручную или не существовать).
 func runRouteDelete(cidr string) {
-	cmd := exec.Command("route", "delete", cidr)
+	cmd := hiddenCmd("route", "delete", cidr)
 	_ = cmd.Run()
 }
 
@@ -527,9 +553,36 @@ func ensureWintunDLL(appDir string) error {
 		return nil
 	}
 
+	// 1) Извлечь встроенный wintun.dll в %LOCALAPPDATA%\wdtt\ и скопировать в appDir.
+	//    Сначала пробуем писать рядом с exe (портативный сценарий с флешки).
+	if len(wintunEmbedded) > 0 {
+		if err := os.WriteFile(target, wintunEmbedded, 0644); err == nil {
+			log.Printf("[WG] Извлечён встроенный wintun.dll (%d KB) → %s", len(wintunEmbedded)/1024, target)
+			return nil
+		}
+		log.Printf("[WG] Не удалось записать wintun.dll рядом с exe (%v), пробую LOCALAPPDATA", filepath.Dir(target))
+	}
+
+	// 2) Fallback: %LOCALAPPDATA%\wdtt\wintun.dll (если appDir недоступен для записи,
+	//    например C:\Program Files\WDTT).
+	if len(wintunEmbedded) > 0 {
+		if localAppData := os.Getenv("LOCALAPPDATA"); localAppData != "" {
+			wdttDir := filepath.Join(localAppData, "wdtt")
+			_ = os.MkdirAll(wdttDir, 0755)
+			localTarget := filepath.Join(wdttDir, "wintun.dll")
+			if err := os.WriteFile(localTarget, wintunEmbedded, 0644); err == nil {
+				log.Printf("[WG] Извлечён встроенный wintun.dll → %s", localTarget)
+				if err := copyFile(localTarget, target); err == nil {
+					return nil
+				}
+			}
+		}
+	}
+
+	// 3) Искать установленный WireGuard/Happ или System32
 	candidates := findWintunDLLs()
 	if len(candidates) == 0 {
-		return fmt.Errorf("wintun.dll не найден. Установите WireGuard for Windows или скопируйте wintun.dll в папку с wdtt-client.exe")
+		return fmt.Errorf("wintun.dll не найден. Переустановите wdtt или установите WireGuard for Windows")
 	}
 
 	for _, src := range candidates {

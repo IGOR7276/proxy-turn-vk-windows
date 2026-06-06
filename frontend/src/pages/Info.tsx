@@ -1,15 +1,16 @@
 import { useState, useEffect } from 'react';
 import { IconInfoCircle, IconBrandGithub, IconCopy, IconCheck, IconBolt, IconUsers, IconServer, IconClock, IconHeart, IconExternalLink, IconShield, IconWorld } from '@tabler/icons-react';
+import iconUrl from '../assets/icon.png';
 import { logStore } from '../lib/stores/logStore';
 import { settingsStore } from '../lib/store';
 import { themeStore } from '../lib/stores/themeStore';
-import { toastStore } from '../lib/stores/toastStore';
 import { tunnelStore } from '../lib/stores/tunnelStore';
 import { IsRunning } from '../../wailsjs/go/backend/App';
 
-const VERSION = '2.0.0';
-const BUILD_DATE = '06.06.2026';
-const REPO_URL = 'https://github.com/user/wdtt-desktop';
+
+const VERSION = '2.0.1';
+const BUILD_DATE = '07.06.2026';
+const REPO_URL = 'https://github.com/IGOR7276/proxy-turn-vk-windows';
 
 export default function Info() {
   const [copied, setCopied] = useState<string | null>(null);
@@ -52,7 +53,8 @@ export default function Info() {
         .if-title { font-size: 20px; font-weight: 600; color: var(--text); flex: 1; }
         .if-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-card); padding: 22px 24px; box-shadow: var(--shadow); }
         .if-hero { text-align: center; padding: 32px 24px 24px; }
-        .if-logo { width: 80px; height: 80px; margin: 0 auto 14px; border-radius: 22px; background: linear-gradient(135deg, var(--accent), var(--accent-soft)); display: flex; align-items: center; justify-content: center; box-shadow: 0 8px 24px rgba(45, 74, 122, 0.15); }
+        .if-logo { width: 88px; height: 88px; margin: 0 auto 14px; border-radius: 22px; display: flex; align-items: center; justify-content: center; box-shadow: 0 8px 24px rgba(45, 74, 122, 0.15); overflow: hidden; }
+        .if-logo img { width: 100%; height: 100%; display: block; object-fit: cover; }
         .if-logo-text { font-size: 32px; font-weight: 700; color: var(--accent-fg); }
         .if-appname { font-size: 24px; font-weight: 600; color: var(--text); margin-bottom: 4px; }
         .if-tagline { font-size: 13px; color: var(--text-3); }
@@ -87,7 +89,7 @@ export default function Info() {
         {/* Hero */}
         <div className="if-card if-hero">
           <div className="if-logo">
-            <span className="if-logo-text">W</span>
+            <img src={iconUrl} alt="WDTT" />
           </div>
           <div className="if-appname">WDTT</div>
           <div className="if-tagline">WireGuard-DTLS-Туннель-Трафик</div>
@@ -193,16 +195,6 @@ export default function Info() {
             GitHub репозиторий
             <IconExternalLink size={14} />
           </a>
-          <button
-            className="if-link"
-            onClick={() => {
-              toastStore.show('Скопировано', 1500);
-              copy('repo', REPO_URL);
-            }}
-          >
-            <IconCopy size={16} />
-            Скопировать ссылку
-          </button>
         </div>
 
         <div className="if-credits">

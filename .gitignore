@@ -2,11 +2,24 @@
 # NOTE: go.sum is intentionally NOT ignored — required for reproducible builds.
 
 # ===== Wails Build Output =====
+# wails build output и release-артефакты (всё, что не исходники)
 build/bin/
 build/appicon.png
 build/windows/info.json
 build/windows/wails.exe.manifest
 build/windows/syso/
+
+# NSIS installer output (wails build → build/release/)
+build/release
+build/release/
+
+# Release zip артефакты (build/wdtt-vX.Y.Z-windows-amd64.zip)
+build/wdtt-*.zip
+
+# wintun source — загружается один раз для embed, потом не нужен
+build/wintun-*.zip
+build/wintun-extract
+build/wintun-extract/
 
 # Frontend
 frontend/dist/
@@ -15,7 +28,8 @@ frontend/node_modules/
 frontend/package.json.md5
 
 # ===== Native Libraries =====
-*.dll
+# *.dll и *.syso в build/bin/ уже под build/bin/. Исключение для встроенного wintun:
+!client/core/assets/wintun.dll
 *.syso
 
 # ===== Old code (replaced by client/ + cmd/cli/) =====

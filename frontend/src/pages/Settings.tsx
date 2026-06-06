@@ -11,7 +11,7 @@ export default function Settings() {
   const [settings, setSettings] = useState<AppSettings>(() => settingsStore.get());
   const [theme, setTheme] = useState(() => themeStore.get());
   const [tunnelState, setTunnelState] = useState(() => tunnelStore.get());
-  const [mtuRaw, setMtuRaw] = useState(String(settings.mtu || 1280));
+  const [mtuRaw, setMtuRaw] = useState(String(settings.mtu || 1380));
   const [dnsUpstreamRaw, setDnsUpstreamRaw] = useState(settings.dnsUpstream);
   const [wgIface, setWgIface] = useState(settings.wgInterface || 'WDTT');
 
@@ -22,6 +22,12 @@ export default function Settings() {
     const n = Number(mtuRaw);
     return Number.isInteger(n) && n >= 576 && n <= 1500;
   })();
+
+  const mtuPresets = [
+    { v: 1280, label: '1280', hint: 'минимум' },
+    { v: 1380, label: '1380', hint: 'игры' },
+    { v: 1420, label: '1420', hint: 'макс' },
+  ];
 
   const dnsUpstreamValid = (() => {
     if (!dnsUpstreamRaw.trim()) return false;
@@ -48,7 +54,7 @@ export default function Settings() {
 
   const commitMtu = () => {
     const n = Number(mtuRaw);
-    const clamped = Number.isFinite(n) ? Math.max(576, Math.min(1500, Math.round(n))) : 1280;
+    const clamped = Number.isFinite(n) ? Math.max(576, Math.min(1500, Math.round(n))) : 1380;
     setMtuRaw(String(clamped));
     update('mtu', clamped);
   };
@@ -128,15 +134,40 @@ export default function Settings() {
           <div className={`sp-row${locked ? ' sp-row-locked' : ''}`}>
             <span className="sp-label">
               <span className="sp-label-main">MTU</span>
-              <span className="sp-label-sub">576–1500</span>
+              <span className="sp-label-sub">576–1500 • 1280 без фрагментации, 1380 для игр, 1420 макс</span>
             </span>
-            <input
-              type="number" min={576} max={1500} step={1}
-              value={mtuRaw}
-              className={`sp-input sp-input--narrow${!mtuValid ? ' sp-input--error' : ''}`}
-              onChange={e => setMtuRaw(e.target.value)}
-              onBlur={commitMtu}
-            />
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-end' }}>
+              <input
+                type="number" min={576} max={1500} step={1}
+                value={mtuRaw}
+                className={`sp-input sp-input--narrow${!mtuValid ? ' sp-input--error' : ''}`}
+                onChange={e => setMtuRaw(e.target.value)}
+                onBlur={commitMtu}
+              />
+              <div style={{ display: 'flex', gap: 4 }}>
+                {mtuPresets.map(p => (
+                  <button
+                    key={p.v}
+                    type="button"
+                    onClick={() => { setMtuRaw(String(p.v)); update('mtu', p.v); }}
+                    title={p.hint}
+                    style={{
+                      padding: '3px 8px',
+                      fontSize: 10,
+                      fontWeight: 600,
+                      border: '1px solid var(--input-border)',
+                      borderRadius: 6,
+                      background: Number(mtuRaw) === p.v ? 'var(--accent)' : 'var(--bg-2)',
+                      color: Number(mtuRaw) === p.v ? 'var(--accent-fg)' : 'var(--text-3)',
+                      cursor: 'pointer',
+                      fontFamily: 'Geist Mono, monospace',
+                    }}
+                  >
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+            </div>
           </div>
         </div>
 

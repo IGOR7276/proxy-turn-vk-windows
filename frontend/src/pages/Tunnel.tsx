@@ -7,6 +7,9 @@ import {
   IconBolt,
   IconLink,
   IconChevronRight,
+  IconPlus,
+  IconPencil,
+  IconCheck,
 } from '@tabler/icons-react';
 import AddServer from '../modals/Add-server';
 import EditServer from '../modals/Edit-server';
@@ -221,6 +224,29 @@ export default function Tunnel() {
         .tn-action--filled { background: var(--accent); color: var(--accent-fg); border: 1.5px solid var(--accent); }
         .tn-action--filled:hover:not(:disabled) { opacity: 0.92; }
         .tn-action--danger { background: var(--danger); color: #fff; border: 1.5px solid var(--danger); }
+        .tn-profiles { display: flex; flex-direction: column; gap: 10px; margin: 0 16px; }
+        .tn-profiles-head { display: flex; align-items: center; justify-content: space-between; padding: 0 2px; }
+        .tn-profiles-title { font-size: 12px; font-weight: 600; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.5px; }
+        .tn-profiles-count { font-size: 12px; color: var(--text-4); }
+        .tn-profiles-row { display: flex; gap: 10px; overflow-x: auto; padding: 2px 2px 6px; scrollbar-width: thin; }
+        .tn-profiles-row::-webkit-scrollbar { height: 4px; }
+        .tn-profiles-row::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 2px; }
+        .tn-pcard { flex: 0 0 220px; background: var(--surface); border: 1.5px solid var(--border); border-radius: var(--r-card); padding: 12px 14px; cursor: pointer; display: flex; flex-direction: column; gap: 6px; transition: border-color 0.12s, background 0.12s, transform 0.12s; position: relative; }
+        .tn-pcard:hover { border-color: var(--text-3); transform: translateY(-1px); }
+        .tn-pcard--active { border-color: var(--accent); background: var(--accent-soft); }
+        .tn-pcard-head { display: flex; align-items: center; gap: 8px; }
+        .tn-pcard-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-4); flex-shrink: 0; }
+        .tn-pcard--active .tn-pcard-dot { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+        .tn-pcard-name { flex: 1; font-size: 14px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .tn-pcard-edit { background: none; border: none; cursor: pointer; padding: 2px; color: var(--text-3); display: flex; border-radius: 6px; transition: background 0.12s, color 0.12s; }
+        .tn-pcard-edit:hover { background: var(--bg-2); color: var(--accent); }
+        .tn-pcard-host { font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .tn-pcard-foot { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-3); }
+        .tn-pcard-power { color: var(--accent); font-weight: 600; padding: 1px 6px; border-radius: 4px; background: var(--accent-soft); }
+        .tn-pcard-hashes { display: flex; align-items: center; gap: 3px; }
+        .tn-pcard-hashes--full { color: var(--accent); font-weight: 600; }
+        .tn-pcard-add { flex: 0 0 140px; background: transparent; border: 1.5px dashed var(--border); border-radius: var(--r-card); padding: 12px 14px; cursor: pointer; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; color: var(--text-3); font-size: 13px; font-weight: 500; transition: border-color 0.12s, color 0.12s, background 0.12s; }
+        .tn-pcard-add:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
       `}</style>
 
       <div className="tn-page">
@@ -324,6 +350,56 @@ export default function Tunnel() {
             )}
           </button>
         </div>
+
+        {/* PROFILES: quick switch saved servers */}
+        {servers.length > 0 && (
+          <div className="tn-profiles">
+            <div className="tn-profiles-head">
+              <span className="tn-profiles-title">Сохранённые профили</span>
+              <span className="tn-profiles-count">{servers.length} шт.</span>
+            </div>
+            <div className="tn-profiles-row">
+              {servers.map(s => {
+                const filled = (s.useGlobalHashes ? settings.hashes : s.hashes).filter(h => h.trim()).length;
+                const isActive = selected?.id === s.id;
+                return (
+                  <div
+                    key={s.id}
+                    className={`tn-pcard${isActive ? ' tn-pcard--active' : ''}`}
+                    onClick={() => setSelected(s)}
+                  >
+                    <div className="tn-pcard-head">
+                      <span className="tn-pcard-dot" />
+                      <span className="tn-pcard-name">{s.name}</span>
+                      <button
+                        className="tn-pcard-edit"
+                        onClick={e => { e.stopPropagation(); setEditServer(s); }}
+                        title="Изменить"
+                      >
+                        <IconPencil size={14} />
+                      </button>
+                    </div>
+                    <div className="tn-pcard-host">{s.host}</div>
+                    <div className="tn-pcard-foot">
+                      <span className="tn-pcard-power">{s.power}w</span>
+                      <span className={`tn-pcard-hashes${filled === 4 ? ' tn-pcard-hashes--full' : ''}`}>
+                        {filled === 4 && <IconCheck size={11} />}
+                        {filled}/4 хешей
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+              <button
+                className="tn-pcard-add"
+                onClick={() => setAddServerOpen(true)}
+              >
+                <IconPlus size={20} />
+                Добавить
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {addServerOpen && <AddServer onClose={() => setAddServerOpen(false)} onAdd={handleAdd} />}
