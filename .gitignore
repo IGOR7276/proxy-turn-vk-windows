@@ -1,13 +1,25 @@
 # ===== Go =====
-go.sum
+# NOTE: go.sum is intentionally NOT ignored — required for reproducible builds.
 
-# ===== Go Client Build =====
-go_client/wdtt-client.exe
-go_client/wg-turn.conf
-go_client/vpn_profiles.json
+# ===== Wails Build Output =====
+build/bin/
+build/appicon.png
+build/windows/info.json
+build/windows/wails.exe.manifest
+build/windows/syso/
+
+# Frontend
+frontend/dist/
+frontend/wailsjs/
+frontend/node_modules/
+frontend/package.json.md5
 
 # ===== Native Libraries =====
 *.dll
+*.syso
+
+# ===== Old code (replaced by client/ + cmd/cli/) =====
+go_client/
 
 # ===== Keystore / Secrets =====
 *.keystore

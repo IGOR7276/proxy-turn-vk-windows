@@ -1,0 +1,117 @@
+@font-face {
+  font-family: 'Geist';
+  font-weight: 500;
+  font-display: block;
+  src: url('/fonts/Geist-500.woff2') format('woff2');
+}
+
+:root {
+  /* Light theme — cool whites, navy accent */
+  --bg: #EEF2F7;
+  --bg-2: #E4EAF1;
+  --bg-3: #DAE2EB;
+  --surface: #FFFFFF;
+  --surface-2: #F7F9FC;
+  --border: #E0E6EE;
+  --border-2: #EBF0F5;
+  --text: #1A1A2A;
+  --text-2: #4A5168;
+  --text-3: #6B7591;
+  --text-4: #97A0B3;
+  --accent: #2D4A7A;
+  --accent-soft: #E5EBF4;
+  --accent-fg: #FFFFFF;
+  --danger: #D64545;
+  --success: #2E8B57;
+  --seg-bg: #E4EAF1;
+  --seg-text: #6B7591;
+  --input-bg: #FFFFFF;
+  --input-border: #C8D2E0;
+  --shadow: 0 1px 2px rgba(45, 74, 122, 0.04), 0 4px 12px rgba(45, 74, 122, 0.05);
+  --overlay-bg: rgba(26, 26, 42, 0.35);
+
+  /* Radii — pillow feel, never sharp */
+  --r-card: 18px;
+  --r-input: 14px;
+  --r-btn: 14px;
+  --r-toggle: 999px;
+  --r-nav: 24px;
+  --r-nav-active: 12px;
+  --r-pill: 999px;
+}
+
+[data-theme="dark"] {
+  /* Dark theme — deep blue-purple, lavender accent */
+  --bg: #1A1A2E;
+  --bg-2: #1F1F35;
+  --bg-3: #252541;
+  --surface: #22223A;
+  --surface-2: #2A2A45;
+  --border: #2E2E48;
+  --border-2: #28283E;
+  --text: #E8E8F0;
+  --text-2: #B5B5CC;
+  --text-3: #8A8AAB;
+  --text-4: #5C5C7A;
+  --accent: #9B8FD6;
+  --accent-soft: #2E2A48;
+  --accent-fg: #FFFFFF;
+  --danger: #E07474;
+  --success: #6FCF97;
+  --seg-bg: #2A2A45;
+  --seg-text: #8A8AAB;
+  --input-bg: #1F1F35;
+  --input-border: #383852;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+  --overlay-bg: rgba(0, 0, 0, 0.55);
+}
+
+#root {
+  width: 100%;
+  max-width: 100%;
+  margin: 0;
+  text-align: left;
+  min-height: 100svh;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Geist', system-ui, sans-serif;
+  font-weight: 500;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  margin: 0;
+  transition: background 0.3s ease, color 0.3s ease;
+}
+
+* { box-sizing: border-box; }
+
+@keyframes modal-in {
+  from { opacity: 0; transform: scale(0.98); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+@keyframes overlay-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes slide-down {
+  from { opacity: 0; transform: translateY(-6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes page-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
