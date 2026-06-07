@@ -441,3 +441,4 @@ func (o *Orchestrator) IsRunning() bool {
 	defer o.mu.Unlock()
 	return o.sess != nil && o.sess.c != nil
 }
+

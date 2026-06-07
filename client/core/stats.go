@@ -34,3 +34,4 @@ func (s *Stats) RunLoop(shutdown <-chan struct{}) {
 		}
 	}
 }
+

@@ -19,3 +19,4 @@ export const toastStore = {
     timer = setTimeout(() => { current = null; notify(); }, ms);
   },
 };
+

@@ -258,3 +258,4 @@ func deleteProfile(name string) error {
 	}
 	return fmt.Errorf("profile not found: %s", name)
 }
+

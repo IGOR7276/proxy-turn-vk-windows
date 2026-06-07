@@ -633,3 +633,4 @@ func buildSliderCursorV2(candidateIndex int, candidateCount int) string {
 	}
 	return string(data)
 }
+

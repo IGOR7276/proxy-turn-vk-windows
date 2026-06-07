@@ -72,3 +72,4 @@ func generateName() string {
 	}
 	return fmt.Sprintf("%s %s", fn, ln)
 }
+

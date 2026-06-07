@@ -84,3 +84,4 @@ export const deployStore = {
   get: (): DeployConfig => parse<DeployConfig>(DEPLOY_KEY, DEFAULT_DEPLOY),
   save: (cfg: DeployConfig) => localStorage.setItem(DEPLOY_KEY, JSON.stringify(cfg)),
 };
+

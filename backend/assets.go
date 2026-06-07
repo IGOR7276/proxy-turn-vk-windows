@@ -15,3 +15,4 @@ func Init(deploy, server []byte) {
 	deployScript = deploy
 	serverBinary = server
 }
+

@@ -49,3 +49,4 @@ func drainCaptchaResult() {
 	default:
 	}
 }
+

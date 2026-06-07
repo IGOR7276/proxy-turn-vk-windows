@@ -31,3 +31,4 @@ func deriveWrapKey(password string) ([]byte, error) {
 	}
 	return key, nil
 }
+

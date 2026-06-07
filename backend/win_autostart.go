@@ -35,3 +35,4 @@ func (a *App) GetAutoStart() bool {
 	_, _, err = k.GetStringValue("WDTT")
 	return err == nil
 }
+

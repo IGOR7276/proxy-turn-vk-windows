@@ -150,3 +150,4 @@ Write-Host "icon.ico: $([System.IO.File]::ReadAllBytes("$buildDir\icon.ico").Len
 $icon256.Dispose()
 $tray32.Dispose()
 Write-Host "Done."
+

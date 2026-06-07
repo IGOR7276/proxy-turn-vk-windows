@@ -49,3 +49,4 @@ export const logStore = {
 
 // Для подключения Wails-событий позже:
 // EventsOn('log', (level, message) => logStore.push(level, message))
+

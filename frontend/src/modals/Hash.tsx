@@ -145,3 +145,4 @@ export default function Hash({ hashes, onClose, onSave }: Props) {
     </>
   );
 }
+

@@ -7,3 +7,4 @@ func (a *App) SetTrayEnabled(v bool) {
 	a.trayEnabled.Store(v)
 }
 func setTrayVisible(v bool) {}
+

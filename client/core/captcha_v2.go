@@ -653,3 +653,4 @@ func parseVkCaptchaError(errData map[string]interface{}) *VkCaptchaError {
 		CaptchaAttempt: captchaAttempt,
 	}
 }
+

@@ -56,3 +56,4 @@ func patchWGConfig(raw string) string {
 
 	return strings.Join(out, "\n")
 }
+

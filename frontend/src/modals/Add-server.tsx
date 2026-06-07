@@ -173,3 +173,4 @@ export default function AddServer({ onClose, onAdd }: Props) {
     </>
   );
 }
+

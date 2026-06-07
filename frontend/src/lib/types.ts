@@ -86,3 +86,4 @@ export function resolveDnsUpstream(settings: AppSettings): string[] {
   }
   return DNS_PRESETS[settings.dnsProvider].servers.split(',');
 }
+

@@ -43,3 +43,4 @@ export const wdttLinkStore = {
   set: (link: WdttLink | null) => { pending = link; listeners.forEach(fn => fn(link)); },
   consume: () => { const l = pending; pending = null; listeners.forEach(fn => fn(null)); return l; },
 };
+

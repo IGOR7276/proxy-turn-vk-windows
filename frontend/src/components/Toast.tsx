@@ -8,3 +8,4 @@ export default function Toast() {
   if (!msg) return null;
   return <div className="toast">{msg}</div>;
 }
+

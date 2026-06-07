@@ -96,3 +96,4 @@ func removeExcludeRoutes() {
 		log.Printf("[EXCL] Удалено %d exclude-маршрутов", len(cidrs))
 	}
 }
+

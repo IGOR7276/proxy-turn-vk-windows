@@ -158,3 +158,4 @@ export default function EditServer({ server, onClose, onSave, onDelete }: Props)
     </>
   );
 }
+

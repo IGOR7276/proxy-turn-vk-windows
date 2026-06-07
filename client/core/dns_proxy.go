@@ -207,3 +207,4 @@ func (p *dnsProxy) forward(query []byte, server string) ([]byte, error) {
 	}
 	return resp[:n], nil
 }
+

@@ -472,3 +472,4 @@ func RunSession(
 	log.Printf("[СЕССИЯ #%d] Завершена", sessionID)
 	return configDelivered, nil
 }
+

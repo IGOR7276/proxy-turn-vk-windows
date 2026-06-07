@@ -703,3 +703,4 @@ func isYandexDNSAddress(address string) bool {
 	host = strings.Trim(host, "[]")
 	return host == "77.88.8.8" || host == "77.88.8.1"
 }
+

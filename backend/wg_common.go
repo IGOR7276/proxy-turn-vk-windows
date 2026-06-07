@@ -31,3 +31,4 @@ var wgQuickOnlyFields = map[string]bool{
 	"preup": true, "postup": true, "predown": true, "postdown": true,
 	"saveconfig": true,
 }
+
