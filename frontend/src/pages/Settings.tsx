@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { IconSettings2, IconServer2, IconWorld, IconShield, IconSun, IconMoon, IconRotate } from '@tabler/icons-react';
+import { IconSettings2, IconServer2, IconWorld, IconShield, IconSun, IconMoon, IconRotate, IconKey } from '@tabler/icons-react';
 import { settingsStore } from '../lib/store';
 import { tunnelStore } from '../lib/stores/tunnelStore';
 import { themeStore } from '../lib/stores/themeStore';
@@ -228,6 +228,47 @@ export default function Settings() {
               onChange={e => setWgIface(e.target.value)}
               onBlur={commitWgIface}
             />
+          </div>
+        </div>
+
+        {/* VK Hashes */}
+        <div className="sp-section-label">VK Хеши (глобальные)</div>
+        <div className="sp-card">
+          <div className={`sp-row${locked ? ' sp-row-locked' : ''}`} style={{ alignItems: 'flex-start', flexDirection: 'column', gap: 10 }}>
+            <span className="sp-label" style={{ width: '100%' }}>
+              <span className="sp-label-main">
+                <IconKey size={16} />
+                Глобальные VK-ключи
+              </span>
+              <span className="sp-label-sub">используются всеми профилями с включённым «Глобальные хеши». Можно оставить пустыми, если не пользуетесь VK.</span>
+            </span>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, width: '100%' }}>
+              {settings.hashes.map((h, i) => (
+                <input
+                  key={i}
+                  className="sp-input"
+                  style={{ fontFamily: 'Geist Mono, monospace' }}
+                  value={h}
+                  onChange={e => {
+                    const next: [string, string, string, string] = [...settings.hashes] as [string, string, string, string];
+                    next[i] = e.target.value;
+                    update('hashes', next);
+                  }}
+                  placeholder={`ключ ${i + 1}`}
+                  spellCheck={false}
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                />
+              ))}
+            </div>
+            <div style={{ display: 'flex', gap: 8, width: '100%', justifyContent: 'flex-end' }}>
+              <button
+                className="sp-seg-btn"
+                onClick={() => update('hashes', ['', '', '', ''])}
+              >
+                Очистить
+              </button>
+            </div>
           </div>
         </div>
 

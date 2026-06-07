@@ -170,7 +170,12 @@ func (c *Core) Start(ctx context.Context) (<-chan Event, error) {
 	if n < workersPerGroup {
 		n = workersPerGroup
 	}
-	n = (n / workersPerGroup) * workersPerGroup
+	// Округляем ВВЕРХ до ближайшего кратного workersPerGroup (9).
+	// Раньше было (n/9)*9 (вниз) — из-за чего 16 превращалось в 9.
+	// 10..18 → 18, 19..27 → 27 и т.д.
+	if n%workersPerGroup != 0 {
+		n = ((n / workersPerGroup) + 1) * workersPerGroup
+	}
 
 	tp := &TurnParams{
 		Host:    c.cfg.TurnHost,
