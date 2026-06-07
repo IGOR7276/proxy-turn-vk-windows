@@ -13,8 +13,7 @@ import (
 
 
 const (
-	workersPerGroup  = 9
-	defaultCycleSecs = 36000
+	workersPerGroup = 9
 )
 
 // WorkerGroup:
@@ -134,7 +133,10 @@ func WorkerGroup(
 		}
 
 		getStreamCache(credStreamID).invalidate(credStreamID)
-		u, p, urls, refreshErr := GetCreds(ctx, hash, credStreamID)
+		// Hard timeout 35s — иначе зависший auth endpoint блокирует ретраи навсегда
+		refreshCtx, refreshCancel := context.WithTimeout(context.Background(), 35*time.Second)
+		defer refreshCancel()
+		u, p, urls, refreshErr := GetCreds(refreshCtx, hash, credStreamID)
 		if refreshErr != nil {
 			log.Printf("[TURN] Не удалось обновить креды после %s: %v", reason, refreshErr)
 			return false
@@ -151,9 +153,14 @@ func WorkerGroup(
 	// Сигнализируем следующей группе, что мы успешно запустились (креды получены + 2 сек форы)
 	if signalReady != nil {
 		go func() {
-			time.Sleep(2000 * time.Millisecond)
-			close(signalReady)
-			log.Printf("[ГРУППА #%d] Успешный старт! Передача эстафеты следующей группе...", groupID)
+			select {
+			case <-time.After(2000 * time.Millisecond):
+				if ctx.Err() == nil {
+					close(signalReady)
+					log.Printf("[ГРУППА #%d] Успешный старт! Передача эстафеты следующей группе...", groupID)
+				}
+			case <-ctx.Done():
+			}
 		}()
 	}
 
@@ -263,7 +270,14 @@ func WorkerGroup(
 					return
 				}
 
-				retryDelay := time.Duration(5+rand.Intn(11)) * time.Second
+				// Exponential backoff с jitter — предотвращает thundering herd,
+				// когда у VK hiccup и все 9 воркеров ретраят одновременно.
+				// 1: 2-5s, 2: 4-7s, 3: 8-11s, 4: 16-19s, 5+: 30-33s.
+				base := 2 << uint(attempt-1)
+				if base > 30 {
+					base = 30
+				}
+				retryDelay := time.Duration(base)*time.Second + time.Duration(rand.Intn(3))*time.Second
 				select {
 				case <-time.After(retryDelay):
 				case <-ctx.Done():

@@ -130,22 +130,26 @@ func (d *Dispatcher) Unregister(slot *WorkerSlot) {
 func (d *Dispatcher) readLoop() {
 	defer d.wg.Done()
 
+	// Stack-allocated большой буфер для ReadFrom (один раз, без GC).
+	// Копируем в pool нужного размера — экономит память на типичных
+	// пакетах <200 байт (раньше тянули 2048-байтный буфер из пула).
+	buf := make([]byte, readBufSize)
 	for {
 		if err := d.ctx.Err(); err != nil {
 			return
 		}
 
-		pkt := getPktBuf(2048)
-
-		n, addr, err := d.localConn.ReadFrom(pkt)
+		n, addr, err := d.localConn.ReadFrom(buf)
 		if err != nil {
-			putPktBuf(pkt)
 			if d.ctx.Err() != nil {
 				return
 			}
 			time.Sleep(10 * time.Millisecond)
 			continue
 		}
+
+		pkt := getPktBuf(n)
+		copy(pkt, buf[:n])
 		pkt = pkt[:n]
 
 		d.clientAddr.Store(&addr)

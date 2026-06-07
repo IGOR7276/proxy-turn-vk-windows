@@ -1,18 +1,31 @@
 import { useState, useEffect } from 'react';
-import { IconSettings2, IconServer2, IconWorld, IconShield, IconSun, IconMoon, IconRotate, IconKey } from '@tabler/icons-react';
+import { IconSettings2, IconServer2, IconWorld, IconShield, IconSun, IconMoon, IconRotate, IconKey, IconAlertTriangle, IconX } from '@tabler/icons-react';
 import { settingsStore } from '../lib/store';
 import { tunnelStore } from '../lib/stores/tunnelStore';
 import { themeStore } from '../lib/stores/themeStore';
 import { toastStore } from '../lib/stores/toastStore';
 import type { AppSettings } from '../lib/types';
-import { SetTrayEnabled, SetAutoStart, GetAutoStart } from '../../wailsjs/go/backend/App';
+import { DNS_PRESETS } from '../lib/types';
+import { SetTrayEnabled, SetAutoStart, GetAutoStart, SetCloseActionPreference } from '../../wailsjs/go/backend/App';
+
+function extractHashInput(raw: string): string {
+  const v = raw.trim();
+  if (!v) return '';
+  const lower = v.toLowerCase();
+  const marker = '/call/join/';
+  const idx = lower.indexOf(marker);
+  if (idx !== -1) {
+    return v.slice(idx + marker.length).split(/[?#\s]/)[0].trim();
+  }
+  return v.split(/[?#\s]/)[0].trim();
+}
 
 export default function Settings() {
   const [settings, setSettings] = useState<AppSettings>(() => settingsStore.get());
   const [theme, setTheme] = useState(() => themeStore.get());
   const [tunnelState, setTunnelState] = useState(() => tunnelStore.get());
   const [mtuRaw, setMtuRaw] = useState(String(settings.mtu || 1380));
-  const [dnsUpstreamRaw, setDnsUpstreamRaw] = useState(settings.dnsUpstream);
+  const [dnsCustomRaw, setDnsCustomRaw] = useState(settings.dnsCustom || '');
   const [wgIface, setWgIface] = useState(settings.wgInterface || 'WDTT');
 
   useEffect(() => tunnelStore.subscribe(setTunnelState), []);
@@ -29,12 +42,20 @@ export default function Settings() {
     { v: 1420, label: '1420', hint: 'макс' },
   ];
 
-  const dnsUpstreamValid = (() => {
-    if (!dnsUpstreamRaw.trim()) return false;
-    return dnsUpstreamRaw
+  const dnsCustomValid = (() => {
+    if (!dnsCustomRaw.trim()) return false;
+    return dnsCustomRaw
       .split(',').map(s => s.trim()).filter(Boolean)
       .every(ip => /^\d{1,3}(\.\d{1,3}){3}$/.test(ip) && ip.split('.').every(p => +p >= 0 && +p <= 255));
   })();
+
+  const commitDnsCustom = () => {
+    if (dnsCustomValid) {
+      update('dnsCustom', dnsCustomRaw);
+    } else {
+      setDnsCustomRaw(settings.dnsCustom || '');
+    }
+  };
 
   const locked = tunnelState === 'connected' || tunnelState === 'connecting';
 
@@ -57,14 +78,6 @@ export default function Settings() {
     const clamped = Number.isFinite(n) ? Math.max(576, Math.min(1500, Math.round(n))) : 1380;
     setMtuRaw(String(clamped));
     update('mtu', clamped);
-  };
-
-  const commitDnsUpstream = () => {
-    if (dnsUpstreamValid) {
-      update('dnsUpstream', dnsUpstreamRaw);
-    } else {
-      setDnsUpstreamRaw(settings.dnsUpstream);
-    }
   };
 
   const commitWgIface = () => {
@@ -92,6 +105,7 @@ export default function Settings() {
         .sp-toggle--on { background: var(--accent); border-color: var(--accent); }
         .sp-toggle--on::after { background: var(--accent-fg); left: 25px; }
         .sp-seg { display: flex; background: var(--seg-bg); border-radius: var(--r-pill); padding: 3px; gap: 2px; }
+        .sp-seg--compact .sp-seg-btn { padding: 5px 10px; font-size: 11px; white-space: nowrap; }
         .sp-seg-btn { padding: 7px 14px; border: none; border-radius: var(--r-pill); font-size: 12px; font-weight: 600; cursor: pointer; background: transparent; color: var(--seg-text); transition: background 0.15s, color 0.15s; font-family: 'Geist', sans-serif; }
         .sp-seg-btn--active { background: var(--accent); color: var(--accent-fg); }
         .sp-input { padding: 9px 12px; border: 1.5px solid var(--input-border); border-radius: var(--r-input); background: var(--input-bg); color: var(--text); font-size: 14px; font-family: 'Geist Mono', monospace; outline: none; width: 100%; box-sizing: border-box; }
@@ -190,19 +204,44 @@ export default function Settings() {
 
           <div className={`sp-row${locked ? ' sp-row-locked' : ''}`} style={{ alignItems: 'flex-start' }}>
             <span className="sp-label" style={{ paddingTop: 6 }}>
-              <span className="sp-label-main">Upstream DNS</span>
-              <span className="sp-label-sub">через запятую, IP-адреса</span>
+              <span className="sp-label-main">DNS-провайдер</span>
+              <span className="sp-label-sub">
+                {settings.dnsProvider === 'custom'
+                  ? settings.dnsCustom
+                  : DNS_PRESETS[settings.dnsProvider]?.servers}
+              </span>
             </span>
-            <input
-              className={`sp-input${!dnsUpstreamValid ? ' sp-input--error' : ''}`}
-              style={{ width: 200, textAlign: 'left' }}
-              value={dnsUpstreamRaw}
-              onChange={e => setDnsUpstreamRaw(e.target.value)}
-              onBlur={commitDnsUpstream}
-              placeholder="8.8.8.8,1.1.1.1"
-              disabled={!settings.dnsProxyEnabled}
-            />
+            <div className="sp-seg" style={{ flexWrap: 'wrap' }}>
+              {(['google', 'cloudflare', 'yandex', 'custom'] as const).map(p => (
+                <button
+                  key={p}
+                  className={`sp-seg-btn${settings.dnsProvider === p ? ' sp-seg-btn--active' : ''}`}
+                  onClick={() => update('dnsProvider', p)}
+                  disabled={!settings.dnsProxyEnabled}
+                >
+                  {p === 'custom' ? 'Свой' : DNS_PRESETS[p].name}
+                </button>
+              ))}
+            </div>
           </div>
+
+          {settings.dnsProvider === 'custom' && (
+            <div className={`sp-row${locked ? ' sp-row-locked' : ''}`} style={{ alignItems: 'flex-start' }}>
+              <span className="sp-label" style={{ paddingTop: 6 }}>
+                <span className="sp-label-main">Custom DNS</span>
+                <span className="sp-label-sub">через запятую, IP-адреса</span>
+              </span>
+              <input
+                className={`sp-input${!dnsCustomValid ? ' sp-input--error' : ''}`}
+                style={{ width: 220, textAlign: 'left' }}
+                value={dnsCustomRaw}
+                onChange={e => setDnsCustomRaw(e.target.value)}
+                onBlur={commitDnsCustom}
+                placeholder="9.9.9.9,149.112.112.112"
+                disabled={!settings.dnsProxyEnabled}
+              />
+            </div>
+          )}
 
           <div className={`sp-row${locked ? ' sp-row-locked' : ''}`}>
             <span className="sp-label">
@@ -251,7 +290,7 @@ export default function Settings() {
                   value={h}
                   onChange={e => {
                     const next: [string, string, string, string] = [...settings.hashes] as [string, string, string, string];
-                    next[i] = e.target.value;
+                    next[i] = extractHashInput(e.target.value);
                     update('hashes', next);
                   }}
                   placeholder={`ключ ${i + 1}`}
@@ -261,7 +300,21 @@ export default function Settings() {
                 />
               ))}
             </div>
-            <div style={{ display: 'flex', gap: 8, width: '100%', justifyContent: 'flex-end' }}>
+            <div style={{ display: 'flex', gap: 8, width: '100%', alignItems: 'center' }}>
+              {(() => {
+                const filled = settings.hashes.filter(h => h.trim()).length;
+                const dups = filled - new Set(settings.hashes.filter(h => h.trim())).size;
+                if (dups > 0) {
+                  return (
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12, color: 'var(--danger)' }}>
+                      <IconAlertTriangle size={14} stroke={2} />
+                      дубликаты: {dups}
+                    </span>
+                  );
+                }
+                return <span style={{ fontSize: 12, color: 'var(--text-3)' }}>Заполнено: <strong style={{ color: 'var(--accent)' }}>{filled}</strong>/4</span>;
+              })()}
+              <div style={{ flex: 1 }} />
               <button
                 className="sp-seg-btn"
                 onClick={() => update('hashes', ['', '', '', ''])}
@@ -287,6 +340,34 @@ export default function Settings() {
               className={`sp-toggle${settings.linkMode ? ' sp-toggle--on' : ''}`}
               onClick={() => update('linkMode', !settings.linkMode)}
             />
+          </div>
+
+          <div className="sp-row">
+            <span className="sp-label">
+              <span className="sp-label-main">
+                <IconX size={16} />
+                При нажатии на крестик
+              </span>
+              <span className="sp-label-sub">спрашивать / скрыть в трей / закрыть</span>
+            </span>
+            <div className="sp-seg sp-seg--compact">
+              {([
+                { v: 'ask', l: 'Спрашивать' },
+                { v: 'hide', l: 'Скрыть' },
+                { v: 'exit', l: 'Закрыть' },
+              ] as const).map(o => (
+                <button
+                  key={o.v}
+                  className={`sp-seg-btn${settings.closeAction === o.v ? ' sp-seg-btn--active' : ''}`}
+                  onClick={() => {
+                    update('closeAction', o.v);
+                    SetCloseActionPreference(o.v);
+                  }}
+                >
+                  {o.l}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
 

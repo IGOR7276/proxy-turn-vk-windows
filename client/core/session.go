@@ -20,11 +20,12 @@ import (
 
 const (
 	workerSendBuf      = 128
-	sessionReadTimeout = 2 * time.Minute
+	sessionReadTimeout = 30 * time.Minute // долгий простой не должен убивать сессию
 	readBufSize        = 1600
 	socketBufSize      = 625 * 1024
 	keepaliveByte      = 0xFF // DTLS-level keepalive marker
 	keepaliveInterval  = 15 * time.Second
+	dtlsHandshakeTimeout = 20 * time.Second // медленный WG успеет договориться
 )
 
 // Handshake semaphore: limit to 3 concurrent DTLS handshakes
@@ -80,8 +81,15 @@ func RunSession(
 		turnAddress string
 	)
 
-	for _, candidate := range creds.TurnURLs {
-		selectedURL := candidate
+	// Load-balance: начинаем с URL по индексу (sessionID % len), далее по кругу.
+	// С 2 TURN-URL и 9 воркерами ~5 идут на [0], 4 на [1] — агрегатный BW ×2.
+	// Если первый URL упал — fallback по цепочке до рабочего.
+	startIdx := 0
+	if len(creds.TurnURLs) > 0 {
+		startIdx = sessionID % len(creds.TurnURLs)
+	}
+	for i := 0; i < len(creds.TurnURLs); i++ {
+		selectedURL := creds.TurnURLs[(startIdx+i)%len(creds.TurnURLs)]
 		urlhost, urlport, err := net.SplitHostPort(selectedURL)
 		if err != nil {
 			turnErr = err
@@ -190,11 +198,10 @@ func RunSession(
 			case <-sessCtx.Done():
 				return
 			case <-t.C:
-				if _, err := tc.SendBindingRequest(); err != nil {
-					log.Printf("[СЕССИЯ #%d] TURN binding failed: %v, closing session", sessionID, err)
-					sessCancel()
-					return
-				}
+				// Pion SendBindingRequest иногда возвращает spurious errors при
+				// кратковременной блокировке UDP. Игнорируем — следующий тик
+				// повторит. Не убиваем сессию из-за флапа.
+				_, _ = tc.SendBindingRequest()
 			}
 		}
 	}()
@@ -313,7 +320,7 @@ func RunSession(
 	}
 	defer dtlsConn.Close()
 
-	hctx, hcancel := context.WithTimeout(sessCtx, 15*time.Second)
+	hctx, hcancel := context.WithTimeout(sessCtx, dtlsHandshakeTimeout)
 	log.Printf("[ВОРКЕР #%d] [DTLS] Рукопожатие (Handshake)...", sessionID)
 	err = dtlsConn.HandshakeContext(hctx)
 	hcancel()

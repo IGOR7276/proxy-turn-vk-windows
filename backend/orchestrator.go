@@ -17,15 +17,31 @@ import (
 )
 
 // wailsLogWriter перехватывает log.Printf и направляет в Wails-события.
-// Буферизует записи и флашит каждые 100ms чтобы не блокировать core.
+// Параллельно пишет полный лог в файл <config>/wdtt/logs/<session>.log.
+// Буферизует UI-записи и флашит каждые 100ms чтобы не блокировать core.
 type wailsLogWriter struct {
 	ctx  context.Context
 	mu   sync.Mutex
 	buf  []logEntry
 	stop chan struct{}
+	file *os.File
 }
 
 type logEntry struct{ level, msg string }
+
+func newSessionLogFile(peerIP string) *os.File {
+	dir := filepath.Join(configDir(), "logs")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil
+	}
+	ts := time.Now().Format("2006-01-02_15-04-05")
+	name := ts + "_" + peerIP + ".log"
+	f, err := os.OpenFile(filepath.Join(dir, name), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return nil
+	}
+	return f
+}
 
 func (w *wailsLogWriter) start() {
 	w.stop = make(chan struct{})
@@ -65,6 +81,13 @@ func (w *wailsLogWriter) Write(p []byte) (int, error) {
 		msg = strings.TrimSpace(msg[20:])
 	}
 	level := classifyLevel(msg)
+
+	// Пишем в файл сразу (без буфера)
+	if w.file != nil {
+		ts := time.Now().Format("15:04:05")
+		fmt.Fprintf(w.file, "[%s] [%s] %s\n", ts, level, msg)
+	}
+
 	w.mu.Lock()
 	w.buf = append(w.buf, logEntry{level, msg})
 	w.mu.Unlock()
@@ -153,6 +176,7 @@ func loadProfile(name string) (*ProfileData, error) {
 type coreSession struct {
 	c      *core.Core
 	doneCh <-chan core.Event // закрывается когда core завершился
+	done   chan struct{}    // закрывается когда forwardEvents полностью вышел (включая WG-teardown)
 }
 
 // Orchestrator — тонкий прокси между Wails UI и core.Core.
@@ -161,10 +185,11 @@ type Orchestrator struct {
 	mu            sync.Mutex
 	sess          *coreSession
 	prevLogWriter io.Writer
+	onTray        func(connected bool, rx, tx int64, workers int32)
 }
 
-func NewOrchestrator(ctx context.Context) *Orchestrator {
-	return &Orchestrator{appCtx: ctx}
+func NewOrchestrator(ctx context.Context, onTray func(bool, int64, int64, int32)) *Orchestrator {
+	return &Orchestrator{appCtx: ctx, onTray: onTray}
 }
 
 // Start запускает сессию. Возвращает ошибку, если уже запущена.
@@ -199,7 +224,7 @@ func (o *Orchestrator) launch(p ConnectParams) (*coreSession, error) {
 	if _, already := log.Writer().(*wailsLogWriter); !already {
 		o.prevLogWriter = log.Writer()
 	}
-	lw := &wailsLogWriter{ctx: o.appCtx}
+	lw := &wailsLogWriter{ctx: o.appCtx, file: newSessionLogFile(p.Profile)}
 	lw.start()
 	log.SetOutput(lw)
 
@@ -267,12 +292,34 @@ func (o *Orchestrator) launch(p ConnectParams) (*coreSession, error) {
 		return nil, fmt.Errorf("core start: %w", err)
 	}
 
-	sess := &coreSession{c: c, doneCh: events}
+	sess := &coreSession{c: c, doneCh: events, done: make(chan struct{})}
 	go o.forwardEvents(sess)
+	// Polling-цикл статистики для tray-иконки.
+	if o.onTray != nil {
+		go o.statsLoop(sess)
+	}
 	return sess, nil
 }
 
+// statsLoop опрашивает core.Stats() каждые 2с и дёргает onTray callback.
+// Работает пока жива сессия.
+func (o *Orchestrator) statsLoop(sess *coreSession) {
+	t := time.NewTicker(2 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-sess.done:
+			o.onTray(false, 0, 0, 0)
+			return
+		case <-t.C:
+			snap := sess.c.Stats()
+			o.onTray(true, snap.TotalBytesDown, snap.TotalBytesUp, snap.ActiveConnections)
+		}
+	}
+}
+
 func (o *Orchestrator) forwardEvents(sess *coreSession) {
+	defer close(sess.done)
 	for ev := range sess.doneCh {
 		switch ev.Type {
 		case core.EventState:
@@ -280,6 +327,27 @@ func (o *Orchestrator) forwardEvents(sess *coreSession) {
 			runtime.EventsEmit(o.appCtx, "log", "INFO", fmt.Sprintf("[СОСТОЯНИЕ] %s", ev.Status))
 		case core.EventLog:
 			runtime.EventsEmit(o.appCtx, "log", ev.Level, ev.Msg)
+			// FATAL_AUTH → автостоп + дружелюбное сообщение.
+			// Без автостопа 9 воркеров продолжают долбить VK, накапливая 401.
+			if strings.Contains(ev.Msg, "FATAL_AUTH") {
+				friendly := ev.Msg
+				switch {
+				case strings.Contains(friendly, "неверный пароль"):
+					friendly = "Неверный пароль подключения"
+				case strings.Contains(friendly, "истёк"):
+					friendly = "Срок действия пароля истёк"
+				case strings.Contains(friendly, "другому устройству"):
+					friendly = "Пароль привязан к другому устройству"
+				case strings.Contains(friendly, "запрещён"):
+					friendly = "Доступ запрещён сервером"
+				}
+				runtime.EventsEmit(o.appCtx, "error", friendly)
+				go func() {
+					if sess.c != nil {
+						sess.c.Stop()
+					}
+				}()
+			}
 		case core.EventError:
 			runtime.EventsEmit(o.appCtx, "error", ev.Msg)
 			runtime.EventsEmit(o.appCtx, "log", "ERROR", fmt.Sprintf("[ОШИБКА] %s", ev.Msg))
@@ -302,6 +370,9 @@ func (o *Orchestrator) forwardEvents(sess *coreSession) {
 		default:
 			close(lw.stop)
 		}
+		if lw.file != nil {
+			lw.file.Close()
+		}
 	}
 	if o.prevLogWriter != nil {
 		log.SetOutput(o.prevLogWriter)
@@ -316,7 +387,10 @@ func (o *Orchestrator) forwardEvents(sess *coreSession) {
 	runtime.EventsEmit(o.appCtx, "state_changed", "disconnected", "")
 }
 
-// Stop останавливает текущую сессию (если есть).
+// Stop останавливает текущую сессию (если есть) и ЖДЁТ полного teardown.
+// Без ожидания следующий Start() через миллисекунды получает "already running"
+// потому что o.sess обнуляется только в forwardEvents после WG-teardown,
+// а это занимает 5-15 секунд.
 func (o *Orchestrator) Stop() {
 	o.mu.Lock()
 	sess := o.sess
@@ -325,6 +399,9 @@ func (o *Orchestrator) Stop() {
 		return
 	}
 	sess.c.Stop()
+	if sess.done != nil {
+		<-sess.done
+	}
 }
 
 // SendCaptchaResult передаёт токен капчи в ядро.

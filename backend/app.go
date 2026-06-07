@@ -20,9 +20,15 @@ type App struct {
 	orch        *Orchestrator
 	trayEnabled atomic.Bool
 	trayIcon    []byte
+	closeAction atomic.Value // string: "ask" / "hide" / "exit"
+	allowExit   atomic.Bool  // одноразовый флаг для runtime.Quit без remember
 }
 
-func NewApp(trayIcon []byte) *App { return &App{trayIcon: trayIcon} }
+func NewApp(trayIcon []byte) *App {
+	a := &App{trayIcon: trayIcon}
+	a.closeAction.Store("ask")
+	return a
+}
 
 // Startup вызывается Wails при инициализации. Здесь создаём Orchestrator
 // и регистрируем трей (если включён).
@@ -34,17 +40,69 @@ func (a *App) Startup(ctx context.Context) {
 		// Даём ОС закрыть UDP-сокеты
 		time.Sleep(500 * time.Millisecond)
 	}
-	a.orch = NewOrchestrator(ctx)
+	a.orch = NewOrchestrator(ctx, a.onTrayUpdate)
 	a.startTrayIfNeeded()
 }
 
-// OnBeforeClose скрывает окно в трей, если трей включён, иначе — закрывает.
+// onTrayUpdate вызывается Orchestrator при обновлении статистики.
+// Транслирует в Windows tray (если он активен).
+func (a *App) onTrayUpdate(connected bool, rx, tx int64, workers int32) {
+	setTrayStatus(connected, rx, tx, workers)
+}
+
+// OnBeforeClose обрабатывает клик по X:
+//   - allowExit = true → разовый выход (без remember), return false
+//   - "ask"  → emit "show_close_dialog" на фронт, return true (отмена закрытия)
+//   - "hide" → WindowHide, return true
+//   - "exit" → return false (разрешить закрытие)
+//
+// "ask" — дефолт; фронт показывает диалог с галочкой "Запомнить выбор"
+// и вызывает SetCloseAction для смены режима.
 func (a *App) OnBeforeClose(ctx context.Context) bool {
-	if a.trayEnabled.Load() {
+	if a.allowExit.Load() {
+		a.allowExit.Store(false)
+		return false
+	}
+	act, _ := a.closeAction.Load().(string)
+	switch act {
+	case "hide":
 		runtime.WindowHide(ctx)
 		return true
+	case "exit":
+		return false
+	default: // "ask"
+		runtime.EventsEmit(a.ctx, "show_close_dialog")
+		return true
 	}
-	return false
+}
+
+// SetCloseAction — вызывается фронтом из диалога при клике пользователя.
+//   action   = "hide" | "exit"  → применить сейчас
+//   remember = true             → сохранить в atomic (влияет на будущие OnBeforeClose)
+//   remember = false            → только применить, не сохранять
+// При action="exit" без remember устанавливается одноразовый флаг allowExit,
+// чтобы runtime.Quit не зациклился через повторный OnBeforeClose.
+func (a *App) SetCloseAction(action string, remember bool) {
+	if remember {
+		a.closeAction.Store(action)
+	}
+	switch action {
+	case "hide":
+		runtime.WindowHide(a.ctx)
+	case "exit":
+		if !remember {
+			a.allowExit.Store(true)
+		}
+		runtime.Quit(a.ctx)
+	}
+}
+
+// SetCloseActionPreference — вызывается фронтом при старте, чтобы синхронизировать
+// ранее сохранённый выбор (из localStorage) с Go-стороной. Ничего не применяет.
+func (a *App) SetCloseActionPreference(action string) {
+	if action == "hide" || action == "exit" || action == "ask" {
+		a.closeAction.Store(action)
+	}
 }
 
 // ─── Методы, вызываемые из JS (Wails binding) ───
@@ -62,6 +120,27 @@ func (a *App) IsRunning() bool { return a.orch.IsRunning() }
 func (a *App) Pause()   { a.orch.Pause() }
 func (a *App) Resume()  { a.orch.Resume() }
 func (a *App) SendCaptchaResult(token string) { a.orch.SendCaptchaResult(token) }
+
+// startTrayIfNeeded — инициализация Windows tray (запускается из Startup).
+// Безусловно: тред сам спит до первого SetTrayEnabled(true).
+func (a *App) startTrayIfNeeded() {
+	startTray(a.trayIcon,
+		func() { // onShow — открыть/показать окно
+			runtime.WindowShow(a.ctx)
+		},
+		func() { // onToggle — подключиться/отключиться
+			if a.orch.IsRunning() {
+				a.orch.Stop()
+			} else {
+				runtime.EventsEmit(a.ctx, "tray_request_connect")
+			}
+		},
+		func() { // onQuit — закрыть приложение полностью (обходит OnBeforeClose)
+			a.allowExit.Store(true)
+			runtime.Quit(a.ctx)
+		},
+	)
+}
 
 // CheckVPN — список активных VPN-интерфейсов (исключая наш wg-turn).
 func (a *App) CheckVPN() []string {

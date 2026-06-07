@@ -241,15 +241,23 @@ func SetupWindowsWireGuard(rawConf, ifaceName string, customDNS []string) error 
 	// на upstream-ы через туннель (AllowedIPs 0.0.0.0/0), обходя любые
 	// IP-блокировки провайдера.
 	if len(customDNS) > 0 {
-		// Извлекаем IP из cfg.address (формат "10.66.0.32/32" → "10.66.0.32")
-		// и форсируем его как source IP для исходящих DNS-прокси — чтобы
-		// пакеты гарантированно шли через туннель (default route → WDTT),
-		// а не через локальный Ethernet напрямую (где 8.8.8.8 режется ISP).
-		wdttIP := ""
-		if host, _, err := net.ParseCIDR(cfg.address); err == nil {
-			wdttIP = host.String()
+		// Source IP для DNS-прокси = IP ОРИГИНАЛЬНОГО интерфейса (Ethernet),
+		// а не WDTT. Иначе при exclude-маршруте 8.8.8.8 через 192.168.1.1
+		// ядро отказывается выпускать пакет: source=10.66.0.32, gw=192.168.1.1
+		// → "unreachable host". С Ethernet source всё работает напрямую через ISP.
+		srcIP := ""
+		if origIface != "" {
+			srcIP = getInterfaceIPv4(origIface)
 		}
-		proxy := newDNSProxy(customDNS, wdttIP)
+		if srcIP == "" {
+			// fallback: cfg.address (WDTT). Может вернуть unreachable, но лучше
+			// чем упасть — на некоторых системах origIface пустой.
+			if host, _, err := net.ParseCIDR(cfg.address); err == nil {
+				srcIP = host.String()
+			}
+		}
+		log.Printf("[DNS] Source IP для upstream=%s (origIface=%q)", srcIP, origIface)
+		proxy := newDNSProxy(customDNS, srcIP)
 		if err := proxy.Start(); err != nil {
 			log.Printf("[DNS] Не удалось запустить локальный прокси: %v (возможно, порт 53 занят)", err)
 		} else {
@@ -492,6 +500,26 @@ func findInterfaceNameByIP(ipStr string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// getInterfaceIPv4 возвращает IPv4-адрес указанного интерфейса (Ethernet и т.п.).
+// Используется, чтобы bind DNS-прокси на source IP оригинальной сетевой карты,
+// а не на WDTT — иначе ядро отказывается выпускать пакет: source из одной подсети,
+// а маршрут ведёт в другую ("unreachable host").
+func getInterfaceIPv4(ifaceName string) string {
+	if ifaceName == "" {
+		return ""
+	}
+	out, err := hiddenCmd("powershell", "-NoProfile", "-Command",
+		"$adapter=Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias '"+ifaceName+"'|Where-Object{$_.PrefixOrigin -ne 'WellKnown'}|Select-Object -First 1; if($adapter){$adapter.IPAddress}").Output()
+	if err != nil {
+		return ""
+	}
+	ip := strings.TrimSpace(string(out))
+	if net.ParseIP(ip) != nil {
+		return ip
+	}
+	return ""
 }
 
 // getInterfaceDefaultGateway получает шлюз по умолчанию для указанного интерфейса.

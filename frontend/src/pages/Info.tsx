@@ -8,8 +8,8 @@ import { tunnelStore } from '../lib/stores/tunnelStore';
 import { IsRunning } from '../../wailsjs/go/backend/App';
 
 
-const VERSION = '2.0.2';
-const BUILD_DATE = '07.06.2026';
+const VERSION = '2.0.4';
+const BUILD_DATE = '08.06.2026';
 const REPO_URL = 'https://github.com/IGOR7276/proxy-turn-vk-windows';
 
 export default function Info() {

@@ -16,12 +16,13 @@ import EditServer from '../modals/Edit-server';
 import PasteLink from '../modals/PasteLink';
 import HashEditor from '../modals/Hash';
 import Secrets from '../modals/Secrets';
-import { serverStore, settingsStore } from '../lib/store';
+import { serverStore, settingsStore, selectionStore } from '../lib/store';
 import { tunnelStore } from '../lib/stores/tunnelStore';
 import { toastStore } from '../lib/stores/toastStore';
 import { wdttLinkStore } from '../lib/utils/wdttLink';
 import { SaveProfile, Connect as WailsConnect, Disconnect as WailsDisconnect } from '../../wailsjs/go/backend/App';
 import type { Server, TunnelState, AppSettings } from '../lib/types';
+import { resolveDnsUpstream } from '../lib/types';
 
 const TUNNEL_LABEL: Record<TunnelState, string> = {
   idle: 'Отключено',
@@ -33,10 +34,18 @@ const TUNNEL_LABEL: Record<TunnelState, string> = {
 export default function Tunnel() {
   const navigate = useNavigate();
   const [servers, setServers] = useState<Server[]>(() => serverStore.getAll());
-  const [selected, setSelected] = useState<Server | null>(() => {
+  const [selectedId, setSelectedId] = useState<string | null>(() => {
     const all = serverStore.getAll();
-    return all.length > 0 ? all[0] : null;
+    const saved = selectionStore.get();
+    if (saved && all.some(s => s.id === saved)) return saved;
+    return all[0]?.id ?? null;
   });
+  const selected = selectedId ? servers.find(s => s.id === selectedId) ?? null : null;
+  const setSelected = (s: Server | null) => {
+    const id = s?.id ?? null;
+    setSelectedId(id);
+    selectionStore.set(id);
+  };
   const [tunnelState, setTunnelState] = useState<TunnelState>(() => tunnelStore.get());
   useEffect(() => tunnelStore.subscribe(setTunnelState), []);
 
@@ -95,7 +104,7 @@ export default function Tunnel() {
       return;
     }
     tunnelStore.set('connecting');
-    const dnsUpstream = s.dnsUpstream.split(',').map(p => p.trim()).filter(Boolean);
+    const dnsUpstream = resolveDnsUpstream(s);
     try {
       await WailsConnect({
         profile: selected.name,
@@ -109,8 +118,12 @@ export default function Tunnel() {
         wgInterface: s.wgInterface || 'WDTT',
       });
       navigate('/logs');
-    } catch {
+    } catch (err) {
       tunnelStore.set('idle');
+      toastStore.show(
+        err instanceof Error ? `Ошибка: ${err.message}` : 'Ошибка запуска туннеля',
+        4000,
+      );
     }
   };
 
@@ -228,10 +241,8 @@ export default function Tunnel() {
         .tn-profiles-head { display: flex; align-items: center; justify-content: space-between; padding: 0 2px; }
         .tn-profiles-title { font-size: 12px; font-weight: 600; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.5px; }
         .tn-profiles-count { font-size: 12px; color: var(--text-4); }
-        .tn-profiles-row { display: flex; gap: 10px; overflow-x: auto; padding: 2px 2px 6px; scrollbar-width: thin; }
-        .tn-profiles-row::-webkit-scrollbar { height: 4px; }
-        .tn-profiles-row::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 2px; }
-        .tn-pcard { flex: 0 0 220px; background: var(--surface); border: 1.5px solid var(--border); border-radius: var(--r-card); padding: 12px 14px; cursor: pointer; display: flex; flex-direction: column; gap: 6px; transition: border-color 0.12s, background 0.12s, transform 0.12s; position: relative; }
+        .tn-profiles-row { display: grid; grid-template-columns: repeat(3, 220px); gap: 10px; padding: 2px 2px 6px; }
+        .tn-pcard { background: var(--surface); border: 1.5px solid var(--border); border-radius: var(--r-card); padding: 12px 14px; cursor: pointer; display: flex; flex-direction: column; gap: 6px; transition: border-color 0.12s, background 0.12s, transform 0.12s; position: relative; }
         .tn-pcard:hover { border-color: var(--text-3); transform: translateY(-1px); }
         .tn-pcard--active { border-color: var(--accent); background: var(--accent-soft); }
         .tn-pcard-head { display: flex; align-items: center; gap: 8px; }
@@ -245,7 +256,7 @@ export default function Tunnel() {
         .tn-pcard-power { color: var(--accent); font-weight: 600; padding: 1px 6px; border-radius: 4px; background: var(--accent-soft); }
         .tn-pcard-hashes { display: flex; align-items: center; gap: 3px; }
         .tn-pcard-hashes--full { color: var(--accent); font-weight: 600; }
-        .tn-pcard-add { flex: 0 0 140px; background: transparent; border: 1.5px dashed var(--border); border-radius: var(--r-card); padding: 12px 14px; cursor: pointer; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; color: var(--text-3); font-size: 13px; font-weight: 500; transition: border-color 0.12s, color 0.12s, background 0.12s; }
+        .tn-pcard-add { background: transparent; border: 1.5px dashed var(--border); border-radius: var(--r-card); padding: 12px 14px; cursor: pointer; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; color: var(--text-3); font-size: 13px; font-weight: 500; transition: border-color 0.12s, color 0.12s, background 0.12s; }
         .tn-pcard-add:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
       `}</style>
 

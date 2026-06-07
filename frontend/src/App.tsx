@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import Layout from './components/Layout';
 import Tunnel from './pages/Tunnel';
@@ -7,6 +7,7 @@ import Logs from './pages/Logs';
 import Info from './pages/Info';
 import SettingsPage from './pages/Settings';
 import Toast from './components/Toast';
+import CloseDialog from './modals/CloseDialog';
 import { wdttLinkStore, parseWdttUrl } from './lib/utils/wdttLink';
 import { toastStore } from './lib/stores/toastStore';
 import { logStore } from './lib/stores/logStore';
@@ -14,7 +15,7 @@ import { tunnelStore } from './lib/stores/tunnelStore';
 import type { LogLevel } from './lib/stores/logStore';
 import { EventsOn } from '../wailsjs/runtime/runtime';
 import { settingsStore } from './lib/store';
-import { SetTrayEnabled } from '../wailsjs/go/backend/App';
+import { SetTrayEnabled, SetCloseAction, SetCloseActionPreference } from '../wailsjs/go/backend/App';
 
 function useWdttPaste() {
   useEffect(() => {
@@ -60,11 +61,28 @@ function useWailsEvents() {
 export default function App() {
   useWailsEvents();
   useWdttPaste();
+  const [closeDialog, setCloseDialog] = useState(false);
 
   useEffect(() => {
     const s = settingsStore.get();
     SetTrayEnabled(s.tray);
+    SetCloseActionPreference(s.closeAction);
   }, []);
+
+  useEffect(() => {
+    const off = EventsOn('show_close_dialog', () => setCloseDialog(true));
+    return () => off();
+  }, []);
+
+  const handleCloseChoice = (action: 'hide' | 'exit', remember: boolean) => {
+    setCloseDialog(false);
+    if (remember) {
+      const s = settingsStore.get();
+      const next = { ...s, closeAction: action };
+      settingsStore.save(next);
+    }
+    SetCloseAction(action, remember);
+  };
 
   return (
     <BrowserRouter>
@@ -78,6 +96,12 @@ export default function App() {
         </Route>
       </Routes>
       <Toast />
+      {closeDialog && (
+        <CloseDialog
+          onClose={() => setCloseDialog(false)}
+          onChoose={handleCloseChoice}
+        />
+      )}
     </BrowserRouter>
   );
 }

@@ -3,8 +3,10 @@ module wdtt-desktop
 go 1.26
 
 require (
+	github.com/lxn/win v0.0.0-20210218163916-a377121e959e
 	github.com/wailsapp/wails/v2 v2.12.0
 	golang.org/x/crypto v0.52.0
+	golang.org/x/image v0.12.0
 	golang.org/x/sys v0.45.0
 	wg-turn-client v0.0.0
 )

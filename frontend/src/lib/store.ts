@@ -3,6 +3,7 @@ import { DEFAULT_SETTINGS, DEFAULT_DEPLOY } from './types';
 
 const SERVERS_KEY = 'wdtt_servers';
 const SETTINGS_KEY = 'wdtt_settings';
+const SELECTED_KEY = 'wdtt_selected_server';
 
 function parse<T>(key: string, fallback: T): T {
   try {
@@ -37,7 +38,23 @@ export const serverStore = {
     serverStore.save(serverStore.getAll().map(x => x.id === s.id ? s : x));
   },
   remove: (id: string) => {
-    serverStore.save(serverStore.getAll().filter(s => s.id !== id));
+    const all = serverStore.getAll();
+    serverStore.save(all.filter(s => s.id !== id));
+    if (selectionStore.get() === id) {
+      const next = serverStore.getAll()[0]?.id ?? null;
+      selectionStore.set(next);
+    }
+  },
+};
+
+export const selectionStore = {
+  get: (): string | null => {
+    const v = localStorage.getItem(SELECTED_KEY);
+    return v && v !== 'null' ? v : null;
+  },
+  set: (id: string | null) => {
+    if (id == null) localStorage.removeItem(SELECTED_KEY);
+    else localStorage.setItem(SELECTED_KEY, id);
   },
 };
 
@@ -48,6 +65,14 @@ export const settingsStore = {
     // ensure hashes is always exactly 4 strings
     const h = Array.isArray(merged.hashes) ? merged.hashes : [];
     merged.hashes = [h[0] ?? '', h[1] ?? '', h[2] ?? '', h[3] ?? ''];
+    // миграция со старого формата: dnsUpstream="8.8.8.8,1.1.1.1" → dnsProvider='google'
+    if (typeof (saved as { dnsUpstream?: string }).dnsUpstream === 'string' && !saved.dnsProvider) {
+      const legacy = (saved as { dnsUpstream: string }).dnsUpstream.replace(/\s+/g, '');
+      if (legacy === '8.8.8.8,8.8.4.4') merged.dnsProvider = 'google';
+      else if (legacy === '1.1.1.1,1.0.0.1') merged.dnsProvider = 'cloudflare';
+      else if (legacy === '77.88.8.8,77.88.8.1') merged.dnsProvider = 'yandex';
+      else { merged.dnsProvider = 'custom'; merged.dnsCustom = legacy; }
+    }
     return merged;
   },
   save: (settings: AppSettings) => localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)),
