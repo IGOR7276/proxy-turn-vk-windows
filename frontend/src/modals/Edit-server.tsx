@@ -1,9 +1,10 @@
 import { useState } from 'react';
-import { IconCircleHalf2, IconHash } from '@tabler/icons-react';
+import { IconCircleHalf2, IconHash, IconFileExport } from '@tabler/icons-react';
 import type { Server } from '../lib/types';
 import { SaveProfile, DeleteProfile } from '../../wailsjs/go/backend/App';
 import { settingsStore } from '../lib/store';
 import { toastStore } from '../lib/stores/toastStore';
+import { stripVkUrl, profileToQwdttJson } from '../lib/utils/qwdttParser';
 
 interface Props {
   server: Server;
@@ -24,13 +25,13 @@ export default function EditServer({ server, onClose, onSave, onDelete }: Props)
 
   const setHash = (idx: number, v: string) => {
     const next: [string, string, string, string] = [...hashes];
-    next[idx] = v;
+    next[idx] = stripVkUrl(v);
     setHashes(next);
   };
 
   const handleSave = async () => {
     if (!name.trim() || !serverIp.trim()) return;
-    const filled = useGlobal ? [] : hashes.filter(h => h.trim());
+    const filled = useGlobal ? [] : hashes.map(h => stripVkUrl(h)).filter(Boolean);
     const updated: Server = {
       ...server,
       name: name.trim(),
@@ -63,6 +64,23 @@ export default function EditServer({ server, onClose, onSave, onDelete }: Props)
     onDelete(server.id);
     toastStore.show(`Сервер ${server.name} удалён`, 2500);
     onClose();
+  };
+
+  const handleExport = () => {
+    const json = profileToQwdttJson({
+      name: name.trim() || server.name,
+      host: `${serverIp.trim()}:${serverPort.trim() || '56000'}`,
+      password,
+      hashes: useGlobal ? [] : hashes,
+      power: power || 9,
+    });
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${(name.trim() || server.name).replace(/[^a-zA-Zа-яА-Я0-9_-]/g, '_')}.qwdtt`;
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
   const filledHashes = hashes.filter(h => h.trim()).length;
@@ -149,6 +167,10 @@ export default function EditServer({ server, onClose, onSave, onDelete }: Props)
             <span className="es-power-val">{power}</span>
           </div>
 
+          <button className="es-btn" style={{ marginTop: 8, background: 'var(--bg-2)', color: 'var(--text-2)', border: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }} onClick={handleExport}>
+            <IconFileExport size={16} />
+            Экспорт .qwdtt
+          </button>
           <div className="es-btn-row">
             <button className="es-btn es-btn--save" onClick={handleSave} disabled={!name.trim() || !serverIp.trim()}>Сохранить</button>
             <button className="es-btn es-btn--delete" onClick={handleDelete}>Удалить</button>

@@ -67,7 +67,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   hashes: ['', '', '', ''],
   linkMode: true,
   dnsProxyEnabled: true,
-  dnsProvider: 'google',
+  dnsProvider: 'yandex',
   dnsCustom: '8.8.8.8,1.1.1.1',
   autoWG: true,
   wgInterface: 'WDTT',

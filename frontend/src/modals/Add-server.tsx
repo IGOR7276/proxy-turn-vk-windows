@@ -3,6 +3,7 @@ import { IconCircleHalf2, IconHash } from '@tabler/icons-react';
 import type { Server } from '../lib/types';
 import { SaveProfile } from '../../wailsjs/go/backend/App';
 import { parseWdttUrl } from '../lib/utils/wdttLink';
+import { stripVkUrl } from '../lib/utils/qwdttParser';
 import { settingsStore } from '../lib/store';
 import { toastStore } from '../lib/stores/toastStore';
 
@@ -33,7 +34,8 @@ export default function AddServer({ onClose, onAdd }: Props) {
     if (parsed.name !== 'Server') setName(parsed.name);
     else if (!name) setName(`${parsed.ip}:${parsed.dtlsPort}`);
     if (parsed.hashes.length > 0) {
-      const h = parsed.hashes.slice(0, 4);
+      const clean = parsed.hashes.map(stripVkUrl);
+      const h = clean.slice(0, 4);
       setHashes([h[0] ?? '', h[1] ?? '', h[2] ?? '', h[3] ?? '']);
       setUseGlobal(false);
     }
@@ -41,14 +43,14 @@ export default function AddServer({ onClose, onAdd }: Props) {
 
   const setHash = (idx: number, v: string) => {
     const next: [string, string, string, string] = [...hashes];
-    next[idx] = v;
+    next[idx] = stripVkUrl(v);
     setHashes(next);
   };
 
   const handleAdd = async () => {
     if (!name.trim() || !ip.trim()) return;
     const host = `${ip.trim()}:${port.trim() || '56000'}`;
-    const filled = useGlobal ? [] : hashes.filter(h => h.trim());
+    const filled = useGlobal ? [] : hashes.map(stripVkUrl).filter(Boolean);
 
     await SaveProfile(name.trim(), {
       peer: host,
@@ -67,7 +69,7 @@ export default function AddServer({ onClose, onAdd }: Props) {
       name: name.trim(),
       host,
       password,
-      hashes: useGlobal ? ['', '', '', ''] : hashes,
+      hashes: useGlobal ? ['', '', '', ''] : hashes.map(h => stripVkUrl(h)) as [string, string, string, string],
       useGlobalHashes: useGlobal,
       power: power || DEFAULT_POWER,
     });

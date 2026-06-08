@@ -241,20 +241,16 @@ func SetupWindowsWireGuard(rawConf, ifaceName string, customDNS []string) error 
 	// на upstream-ы через туннель (AllowedIPs 0.0.0.0/0), обходя любые
 	// IP-блокировки провайдера.
 	if len(customDNS) > 0 {
-		// Source IP для DNS-прокси = IP ОРИГИНАЛЬНОГО интерфейса (Ethernet),
-		// а не WDTT. Иначе при exclude-маршруте 8.8.8.8 через 192.168.1.1
-		// ядро отказывается выпускать пакет: source=10.66.0.32, gw=192.168.1.1
-		// → "unreachable host". С Ethernet source всё работает напрямую через ISP.
+		// Source IP для DNS-прокси = IP WireGuard-туннеля (cfg.address).
+		// Все DNS-запросы идут через туннель → VPS делает SNAT → 8.8.8.8
+		// отвечает VPS → ответ возвращается через туннель.
+		// Если использовать Ethernet IP (192.168.x.x), VPS не сможет
+		// замаскировать пакет (SNAT только для 10.66.0.0/24), и DNS
+		// к заблокированным в РФ upstream-ам (8.8.8.8, 1.1.1.1) упадёт
+		// по таймауту.
 		srcIP := ""
-		if origIface != "" {
-			srcIP = getInterfaceIPv4(origIface)
-		}
-		if srcIP == "" {
-			// fallback: cfg.address (WDTT). Может вернуть unreachable, но лучше
-			// чем упасть — на некоторых системах origIface пустой.
-			if host, _, err := net.ParseCIDR(cfg.address); err == nil {
-				srcIP = host.String()
-			}
+		if host, _, err := net.ParseCIDR(cfg.address); err == nil {
+			srcIP = host.String()
 		}
 		log.Printf("[DNS] Source IP для upstream=%s (origIface=%q)", srcIP, origIface)
 		proxy := newDNSProxy(customDNS, srcIP)

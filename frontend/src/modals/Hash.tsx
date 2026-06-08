@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { IconHash, IconTrash, IconX } from '@tabler/icons-react';
 import { toastStore } from '../lib/stores/toastStore';
+import { stripVkUrl } from '../lib/utils/qwdttParser';
 
 interface Props {
   hashes: [string, string, string, string];
@@ -8,26 +9,14 @@ interface Props {
   onSave: (hashes: [string, string, string, string]) => void;
 }
 
-function extractHash(raw: string): string {
-  const v = raw.trim();
-  if (!v) return '';
-  const lower = v.toLowerCase();
-  const marker = '/call/join/';
-  const idx = lower.indexOf(marker);
-  if (idx !== -1) {
-    return v.slice(idx + marker.length).split(/[?#\s]/)[0].trim();
-  }
-  return v.split(/[?#\s]/)[0].trim();
-}
-
 export default function Hash({ hashes, onClose, onSave }: Props) {
   const [values, setValues] = useState<[string, string, string, string]>(
-    hashes.map(h => extractHash(h)) as [string, string, string, string]
+    hashes.map(h => stripVkUrl(h)) as [string, string, string, string]
   );
 
   const set = (i: number, v: string) => {
     const next = [...values] as [string, string, string, string];
-    next[i] = v;
+    next[i] = stripVkUrl(v);
     setValues(next);
   };
 
@@ -38,7 +27,7 @@ export default function Hash({ hashes, onClose, onSave }: Props) {
   const clearAll = () => setAll(['', '', '', '']);
 
   const save = () => {
-    const normalized = values.map(extractHash) as [string, string, string, string];
+    const normalized = values.map(s => s.trim()) as [string, string, string, string];
     const nonEmpty = normalized.filter(v => v !== '');
     if (new Set(nonEmpty).size !== nonEmpty.length) {
       toastStore.show('Обнаружены дублирующиеся хеши');

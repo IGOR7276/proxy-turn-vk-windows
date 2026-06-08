@@ -10,16 +10,19 @@ import {
   IconPlus,
   IconPencil,
   IconCheck,
+  IconFileImport,
 } from '@tabler/icons-react';
 import AddServer from '../modals/Add-server';
 import EditServer from '../modals/Edit-server';
 import PasteLink from '../modals/PasteLink';
+import ImportQwdtt from '../modals/ImportQwdtt';
 import HashEditor from '../modals/Hash';
 import Secrets from '../modals/Secrets';
 import { serverStore, settingsStore, selectionStore } from '../lib/store';
 import { tunnelStore } from '../lib/stores/tunnelStore';
 import { toastStore } from '../lib/stores/toastStore';
 import { wdttLinkStore } from '../lib/utils/wdttLink';
+import { stripVkUrl } from '../lib/utils/qwdttParser';
 import { SaveProfile, Connect as WailsConnect, Disconnect as WailsDisconnect } from '../../wailsjs/go/backend/App';
 import type { Server, TunnelState, AppSettings } from '../lib/types';
 import { resolveDnsUpstream } from '../lib/types';
@@ -53,6 +56,7 @@ export default function Tunnel() {
   const [hashOpen, setHashOpen] = useState(false);
   const [secretsOpen, setSecretsOpen] = useState(false);
   const [pasteLinkOpen, setPasteLinkOpen] = useState(false);
+  const [importQwdttOpen, setImportQwdttOpen] = useState(false);
   const [addServerOpen, setAddServerOpen] = useState(false);
   const [editServer, setEditServer] = useState<Server | null>(null);
   const [reconnectAt, setReconnectAt] = useState(0);
@@ -68,14 +72,15 @@ export default function Tunnel() {
       const host = `${consumed.ip}:${consumed.dtlsPort}`;
       const name = consumed.name;
       const finish = async (saveHashes: boolean) => {
+        const clean = consumed.hashes.map(stripVkUrl).filter(Boolean);
         await SaveProfile(name, {
-          peer: host, password: consumed.password, hashes: saveHashes ? consumed.hashes : [],
+          peer: host, password: consumed.password, hashes: saveHashes ? clean : [],
           turn: '', port: '', device_id: '', listen: '',
         });
         const existing = serverStore.getAll().find(s => s.host === host);
         const s = existing ?? serverStore.add({
           name, host, password: consumed.password,
-          hashes: saveHashes ? (consumed.hashes.slice(0, 4) as [string, string, string, string]) : ['', '', '', ''],
+          hashes: saveHashes ? (clean.slice(0, 4) as [string, string, string, string]) : ['', '', '', ''],
           useGlobalHashes: !saveHashes,
           power: 9,
         });
@@ -96,7 +101,7 @@ export default function Tunnel() {
     if (!selected) return;
     const s = settingsStore.get();
     const useGlobal = selected.useGlobalHashes;
-    const filled = (useGlobal ? s.hashes : selected.hashes).filter(h => h.trim());
+    const filled = (useGlobal ? s.hashes : selected.hashes).map(h => stripVkUrl(h)).filter(Boolean);
     if (filled.length === 0) {
       toastStore.show(useGlobal
         ? 'Добавьте глобальные хеши или заполните хеши профиля'
@@ -154,26 +159,56 @@ export default function Tunnel() {
     setSelected(s);
   };
 
+  const handleImportQwdtt = async (result: { profiles: Array<{ name: string; peer: string; hashes: string[]; workers: number; password: string }>; groupName?: string }) => {
+    let count = 0;
+    for (const p of result.profiles) {
+      const name = result.groupName
+        ? `${result.groupName} - ${p.name}`
+        : p.name;
+      const cleanHashes = p.hashes.map(stripVkUrl).filter(Boolean);
+      await SaveProfile(name, {
+        peer: p.peer,
+        password: p.password,
+        hashes: cleanHashes,
+        turn: '', port: '', device_id: '', listen: '',
+      }).catch(() => {});
+      serverStore.add({
+        name,
+        host: p.peer,
+        password: p.password,
+        hashes: (cleanHashes.slice(0, 4) as [string, string, string, string]).length > 0
+          ? (cleanHashes.slice(0, 4) as [string, string, string, string])
+          : ['', '', '', ''],
+        useGlobalHashes: cleanHashes.length === 0,
+        power: p.workers || 9,
+      });
+      count++;
+    }
+    setServers(serverStore.getAll());
+    toastStore.show(`Импортировано профилей: ${count}`, 3000);
+  };
+
   const handleApplyLink = async (link: { ip: string; dtlsPort: string; password: string; hashes: string[]; name: string }) => {
     const host = `${link.ip}:${link.dtlsPort}`;
     const name = link.name;
+    const clean = link.hashes.map(stripVkUrl).filter(Boolean);
     await SaveProfile(name, {
-      peer: host, password: link.password, hashes: link.hashes,
+      peer: host, password: link.password, hashes: clean,
       turn: '', port: '', device_id: '', listen: '',
     });
     const existing = serverStore.getAll().find(s => s.host === host);
     const s = existing ?? serverStore.add({
       name, host, password: link.password,
-      hashes: (link.hashes.slice(0, 4) as [string, string, string, string]).length > 0
-        ? (link.hashes.slice(0, 4) as [string, string, string, string])
+      hashes: (clean.slice(0, 4) as [string, string, string, string]).length > 0
+        ? (clean.slice(0, 4) as [string, string, string, string])
         : ['', '', '', ''],
-      useGlobalHashes: link.hashes.length === 0,
+      useGlobalHashes: clean.length === 0,
       power: 9,
     });
     setServers(serverStore.getAll());
     setSelected(s);
-    if (link.hashes.length > 0) {
-      toastStore.show(`Профиль создан + ${link.hashes.length} хешей`, 3000);
+    if (clean.length > 0) {
+      toastStore.show(`Профиль создан + ${clean.length} хешей`, 3000);
     } else {
       toastStore.show(`Профиль ${existing ? 'обновлён' : 'создан'}: ${name}`, 3000);
     }
@@ -327,6 +362,16 @@ export default function Tunnel() {
             <span className="tn-link-row-label">Вставить wdtt:// ссылку</span>
             <IconChevronRight size={16} style={{ color: 'var(--text-3)' }} />
           </button>
+          <div className="tn-divider" />
+          <button
+            className="tn-link-row"
+            onClick={() => setImportQwdttOpen(true)}
+            type="button"
+          >
+            <IconFileImport size={16} style={{ color: 'var(--text-3)' }} />
+            <span className="tn-link-row-label">Импорт .qwdtt</span>
+            <IconChevronRight size={16} style={{ color: 'var(--text-3)' }} />
+          </button>
         </div>
 
         {/* ACTIONS: Secrets + Connect */}
@@ -448,6 +493,12 @@ export default function Tunnel() {
         <PasteLink
           onClose={() => setPasteLinkOpen(false)}
           onApply={handleApplyLink}
+        />
+      )}
+      {importQwdttOpen && (
+        <ImportQwdtt
+          onClose={() => setImportQwdttOpen(false)}
+          onImport={handleImportQwdtt}
         />
       )}
     </>

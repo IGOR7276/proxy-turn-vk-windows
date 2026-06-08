@@ -62,4 +62,3 @@ require (
 )
 
 replace wg-turn-client => ./client
-
