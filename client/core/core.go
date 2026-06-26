@@ -22,6 +22,7 @@ type Config struct {
 	DeviceID     string   // -device-id
 	Workers      int      // -n
 	CaptchaMode  string   // -captcha-mode: auto/wv/rjs
+	VkAuthMode   string   // -vk-auth: anonymous/account
 	Fingerprint  string   // -fingerprint: chrome/safari/...
 	ClientIDs    string   // -client-ids
 	WGInterface  string   // -wg-interface, default "WDTT"
@@ -123,6 +124,7 @@ func New(cfg Config) *Core {
 		events: make(chan Event, 256),
 	}
 	setCaptchaMode(cfg.CaptchaMode)
+	SetVkAuthMode(cfg.VkAuthMode)
 	if cfg.Fingerprint != "" {
 		SetActiveFingerprint(cfg.Fingerprint)
 	}
@@ -167,14 +169,22 @@ func (c *Core) Start(ctx context.Context) (<-chan Event, error) {
 	if n > maxWorkers {
 		n = maxWorkers
 	}
-	if n < workersPerGroup {
-		n = workersPerGroup
-	}
-	// Округляем ВВЕРХ до ближайшего кратного workersPerGroup (9).
-	// Раньше было (n/9)*9 (вниз) — из-за чего 16 превращалось в 9.
-	// 10..18 → 18, 19..27 → 27 и т.д.
-	if n%workersPerGroup != 0 {
-		n = ((n / workersPerGroup) + 1) * workersPerGroup
+	if GetVkAuthMode() == "account" {
+		const accountMaxWorkers = 4
+		if n > accountMaxWorkers {
+			log.Printf("[CORE] Аккаунт VK: TURN-квота ~%d relay на сессию, потоков %d -> %d", accountMaxWorkers, n, accountMaxWorkers)
+			n = accountMaxWorkers
+		}
+		if n < 1 {
+			n = 1
+		}
+	} else {
+		if n < workersPerGroup {
+			n = workersPerGroup
+		}
+		if n%workersPerGroup != 0 {
+			n = ((n / workersPerGroup) + 1) * workersPerGroup
+		}
 	}
 
 	tp := &TurnParams{
@@ -221,6 +231,9 @@ func (c *Core) Start(ctx context.Context) (<-chan Event, error) {
 	}
 
 	numGroups := n / workersPerGroup
+	if numGroups == 0 && n > 0 {
+		numGroups = 1
+	}
 
 	wrapStatus := "OFF"
 	if len(wrapKey) == wrapKeyLen {
@@ -245,6 +258,7 @@ func (c *Core) Start(ctx context.Context) (<-chan Event, error) {
 	log.Printf("[CORE] WRAP: %s", wrapStatus)
 	log.Printf("[CORE] Device ID: %s", c.cfg.DeviceID)
 	log.Printf("[CORE] Captcha: %s", captchaStatus)
+	log.Printf("[CORE] VK Auth: %s", GetVkAuthMode())
 	if c.cfg.AutoWG {
 		log.Printf("[CORE] Windows WG: ON (iface=%s)", c.cfg.WGInterface)
 		if !c.cfg.NoDNSProxy {
@@ -339,6 +353,7 @@ func (c *Core) Start(ctx context.Context) (<-chan Event, error) {
 	workerIDCounter := 1
 	var prevWaitReady <-chan struct{}
 
+	remaining := n
 	for g := 0; g < numGroups; g++ {
 		isFirst := g == 0
 		var myWaitReady <-chan struct{}
@@ -353,7 +368,12 @@ func (c *Core) Start(ctx context.Context) (<-chan Event, error) {
 			prevWaitReady = ch
 		}
 
-		ids := make([]int, workersPerGroup)
+		thisSize := workersPerGroup
+		if remaining < workersPerGroup {
+			thisSize = remaining
+		}
+		remaining -= thisSize
+		ids := make([]int, thisSize)
 		for i := range ids {
 			ids[i] = workerIDCounter
 			workerIDCounter++

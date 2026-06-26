@@ -133,6 +133,9 @@ func WorkerGroup(
 		}
 
 		getStreamCache(credStreamID).invalidate(credStreamID)
+		if GetVkAuthMode() == "account" {
+			InvalidateInjectedTurnCreds(hash)
+		}
 		// Hard timeout 35s — иначе зависший auth endpoint блокирует ретраи навсегда
 		refreshCtx, refreshCancel := context.WithTimeout(context.Background(), 35*time.Second)
 		defer refreshCancel()
@@ -326,7 +329,21 @@ func normalizeVKJoinHash(input string) string {
 	if idx := strings.IndexAny(s, "?#/"); idx != -1 {
 		s = s[:idx]
 	}
-	return strings.Trim(strings.TrimSpace(s), "/")
+	s = strings.Trim(strings.TrimSpace(s), "/")
+
+	if s == "" {
+		return ""
+	}
+
+	if lower2 := strings.ToLower(s); strings.HasPrefix(lower2, "vk.com/") ||
+		strings.HasPrefix(lower2, "vk.ru/") ||
+		strings.HasPrefix(lower2, "m.vk.com/") ||
+		strings.HasPrefix(lower2, "m.vk.ru/") {
+		if idx := strings.Index(s, "/"); idx >= 0 {
+			s = s[idx+1:]
+		}
+	}
+	return s
 }
 
 // TurnParams — конфигурация TURN

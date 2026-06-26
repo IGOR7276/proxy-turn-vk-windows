@@ -5,7 +5,7 @@ import { logStore } from '../lib/stores/logStore';
 import { settingsStore } from '../lib/store';
 import { themeStore } from '../lib/stores/themeStore';
 import { tunnelStore } from '../lib/stores/tunnelStore';
-import { IsRunning } from '../../wailsjs/go/backend/App';
+import { IsRunning, ForceDisconnect } from '../../wailsjs/go/backend/App';
 
 
 const VERSION = '2.0.5';
@@ -35,8 +35,12 @@ export default function Info() {
     };
     update();
     const i = setInterval(update, 1000);
-    IsRunning().then(v => setRunning(v));
-    return () => clearInterval(i);
+    const checkRunning = () => {
+      IsRunning().then(v => setRunning(v));
+    };
+    checkRunning();
+    const ri = setInterval(checkRunning, 3000);
+    return () => { clearInterval(i); clearInterval(ri); };
   }, []);
 
   const copy = (key: string, value: string) => {
@@ -116,6 +120,21 @@ export default function Info() {
             </span>
             <span className="if-value">{stats.hashes}/4</span>
           </div>
+          {running && tunnelState !== 'connected' && (
+            <div className="if-row">
+              <span className="if-label">
+                <IconBolt size={16} />
+                Завис?
+              </span>
+              <button
+                className="if-link"
+                style={{ margin: 0, padding: '6px 14px', fontSize: 13, borderColor: 'var(--danger)' }}
+                onClick={() => { ForceDisconnect(); setRunning(false); }}
+              >
+                Сбросить состояние
+              </button>
+            </div>
+          )}
           <div className="if-row">
             <span className="if-label">
               <IconBolt size={16} />

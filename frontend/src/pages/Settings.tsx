@@ -1,12 +1,12 @@
 import { useState, useEffect } from 'react';
-import { IconSettings2, IconServer2, IconWorld, IconShield, IconSun, IconMoon, IconRotate, IconKey, IconAlertTriangle, IconX } from '@tabler/icons-react';
+import { IconSettings2, IconServer2, IconWorld, IconShield, IconSun, IconMoon, IconRotate, IconKey, IconAlertTriangle, IconX, IconBrandVk } from '@tabler/icons-react';
 import { settingsStore } from '../lib/store';
 import { tunnelStore } from '../lib/stores/tunnelStore';
 import { themeStore } from '../lib/stores/themeStore';
 import { toastStore } from '../lib/stores/toastStore';
 import type { AppSettings } from '../lib/types';
 import { DNS_PRESETS } from '../lib/types';
-import { SetTrayEnabled, SetAutoStart, GetAutoStart, SetCloseActionPreference } from '../../wailsjs/go/backend/App';
+import { SetTrayEnabled, SetAutoStart, GetAutoStart, SetCloseActionPreference, SetVkAuthMode, GetVkAuthMode } from '../../wailsjs/go/backend/App';
 
 function extractHashInput(raw: string): string {
   const v = raw.trim();
@@ -24,12 +24,18 @@ export default function Settings() {
   const [settings, setSettings] = useState<AppSettings>(() => settingsStore.get());
   const [theme, setTheme] = useState(() => themeStore.get());
   const [tunnelState, setTunnelState] = useState(() => tunnelStore.get());
-  const [mtuRaw, setMtuRaw] = useState(String(settings.mtu || 1380));
+  const [mtuRaw, setMtuRaw] = useState(String(settings.mtu || 1280));
   const [dnsCustomRaw, setDnsCustomRaw] = useState(settings.dnsCustom || '');
   const [wgIface, setWgIface] = useState(settings.wgInterface || 'WDTT');
+  const [vkAuthMode, setVkAuthMode] = useState<'anonymous' | 'account'>('anonymous');
 
   useEffect(() => tunnelStore.subscribe(setTunnelState), []);
   useEffect(() => themeStore.subscribe(setTheme), []);
+  useEffect(() => {
+    GetVkAuthMode().then(mode => {
+      setVkAuthMode(mode as 'anonymous' | 'account');
+    }).catch(() => {});
+  }, []);
 
   const mtuValid = (() => {
     const n = Number(mtuRaw);
@@ -75,7 +81,7 @@ export default function Settings() {
 
   const commitMtu = () => {
     const n = Number(mtuRaw);
-    const clamped = Number.isFinite(n) ? Math.max(576, Math.min(1500, Math.round(n))) : 1380;
+    const clamped = Number.isFinite(n) ? Math.max(576, Math.min(1500, Math.round(n))) : 1280;
     setMtuRaw(String(clamped));
     update('mtu', clamped);
   };
@@ -267,6 +273,44 @@ export default function Settings() {
               onChange={e => setWgIface(e.target.value)}
               onBlur={commitWgIface}
             />
+          </div>
+        </div>
+
+        {/* VK Auth Mode */}
+        <div className="sp-section-label">VK Авторизация</div>
+        <div className="sp-card">
+          <div className="sp-row">
+            <span className="sp-label">
+              <span className="sp-label-main">
+                <IconBrandVk size={16} />
+                Режим авторизации
+              </span>
+              <span className="sp-label-sub">
+                {vkAuthMode === 'anonymous' 
+                  ? 'Анонимный режим (по умолчанию)' 
+                  : 'Вход через аккаунт VK (если анонимный не работает)'}
+              </span>
+            </span>
+            <div className="sp-seg">
+              <button
+                className={`sp-seg-btn${vkAuthMode === 'anonymous' ? ' sp-seg-btn--active' : ''}`}
+                onClick={() => {
+                  SetVkAuthMode('anonymous').then(() => {
+                    setVkAuthMode('anonymous');
+                    toastStore.show('Анонимный режим включён', 2000);
+                  }).catch(() => {});
+                }}
+              >Аноним</button>
+              <button
+                className={`sp-seg-btn${vkAuthMode === 'account' ? ' sp-seg-btn--active' : ''}`}
+                onClick={() => {
+                  SetVkAuthMode('account').then(() => {
+                    setVkAuthMode('account');
+                    toastStore.show('Режим VK-аккаунта включён', 2000);
+                  }).catch(() => {});
+                }}
+              >Аккаунт</button>
+            </div>
           </div>
         </div>
 

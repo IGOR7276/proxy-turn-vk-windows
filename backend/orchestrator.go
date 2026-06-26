@@ -149,6 +149,7 @@ type ProfileData struct {
 type ConnectParams struct {
 	Profile     string   `json:"profile"`
 	CaptchaMode string   `json:"captchaMode"`
+	VkAuthMode  string   `json:"vkAuthMode,omitempty"`
 	Workers     int      `json:"workers,omitempty"`
 	MTU         int      `json:"mtu,omitempty"`
 	Hashes      []string `json:"hashes,omitempty"`
@@ -277,6 +278,7 @@ func (o *Orchestrator) launch(p ConnectParams) (*coreSession, error) {
 		ClientIDs:   prof.ClientIDs,
 		Workers:     workers,
 		CaptchaMode: p.CaptchaMode,
+		VkAuthMode:  p.VkAuthMode,
 		WGConfigMTU: p.MTU,
 
 		// Наши уникальные фичи
@@ -327,6 +329,13 @@ func (o *Orchestrator) forwardEvents(sess *coreSession) {
 			runtime.EventsEmit(o.appCtx, "log", "INFO", fmt.Sprintf("[СОСТОЯНИЕ] %s", ev.Status))
 		case core.EventLog:
 			runtime.EventsEmit(o.appCtx, "log", ev.Level, ev.Msg)
+			if strings.Contains(ev.Msg, "VK_AUTH_REQUIRED|") {
+				parts := strings.SplitN(ev.Msg, "VK_AUTH_REQUIRED|", 2)
+				if len(parts) == 2 {
+					hash := strings.TrimSpace(parts[1])
+					runtime.EventsEmit(o.appCtx, "vk_auth_required", hash)
+				}
+			}
 			// FATAL_AUTH → автостоп + дружелюбное сообщение.
 			// Без автостопа 9 воркеров продолжают долбить VK, накапливая 401.
 			if strings.Contains(ev.Msg, "FATAL_AUTH") {
@@ -358,6 +367,9 @@ func (o *Orchestrator) forwardEvents(sess *coreSession) {
 			}
 			if ev.Name == "captcha_required" {
 				runtime.EventsEmit(o.appCtx, "captcha_required", ev.Data)
+			}
+			if ev.Name == "vk_auth_required" {
+				runtime.EventsEmit(o.appCtx, "vk_auth_required", ev.Data)
 			}
 			runtime.EventsEmit(o.appCtx, "event", ev.Name, ev.Data)
 		}
@@ -413,6 +425,11 @@ func (o *Orchestrator) SendCaptchaResult(token string) {
 		return
 	}
 	sess.c.SolveCaptcha(token)
+}
+
+// SendTurnCreds передаёт TURN-креды от VK-аккаунта в ядро.
+func (o *Orchestrator) SendTurnCreds(payload string) {
+	core.HandleTurnCredsPayload("TURN_CREDS|" + payload)
 }
 
 // Pause/Resume управляют doze-режимом воркеров.

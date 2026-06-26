@@ -9,6 +9,13 @@
   "postbuildcommand": "",
   "author": {
     "name": "WDTT"
+  },
+  "info": {
+    "companyName": "WDTT",
+    "productName": "WDTT",
+    "productVersion": "2.1.0",
+    "copyright": "",
+    "comments": ""
   }
 }
 

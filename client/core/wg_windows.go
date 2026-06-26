@@ -93,15 +93,10 @@ func SetupWindowsWireGuard(rawConf, ifaceName string, customDNS []string) error 
 	}
 
 	if cfg.mtu <= 0 {
-		cfg.mtu = 1380
+		cfg.mtu = 1280
 	}
 
-	exePath, err := os.Executable()
-	if err != nil {
-		exePath = "."
-	}
-	exeDir := filepath.Dir(exePath)
-	if err := ensureWintunDLL(exeDir); err != nil {
+	if err := ensureWintunDLL(); err != nil {
 		return err
 	}
 
@@ -571,44 +566,38 @@ func runRouteDelete(cidr string) {
 	_ = cmd.Run()
 }
 
-func ensureWintunDLL(appDir string) error {
-	target := filepath.Join(appDir, "wintun.dll")
+func ensureWintunDLL() error {
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("os.Executable: %w", err)
+	}
+	target := filepath.Join(filepath.Dir(exe), "wintun.dll")
 	if fileExists(target) {
 		return nil
 	}
 
-	// 1) Извлечь встроенный wintun.dll в %LOCALAPPDATA%\wdtt\ и скопировать в appDir.
-	//    Сначала пробуем писать рядом с exe (портативный сценарий с флешки).
 	if len(wintunEmbedded) > 0 {
 		if err := os.WriteFile(target, wintunEmbedded, 0644); err == nil {
 			log.Printf("[WG] Извлечён встроенный wintun.dll (%d KB) → %s", len(wintunEmbedded)/1024, target)
 			return nil
 		}
-		log.Printf("[WG] Не удалось записать wintun.dll рядом с exe (%v), пробую LOCALAPPDATA", filepath.Dir(target))
 	}
 
-	// 2) Fallback: %LOCALAPPDATA%\wdtt\wintun.dll (если appDir недоступен для записи,
-	//    например C:\Program Files\WDTT).
+	// Fallback: %LOCALAPPDATA%\wdtt\
 	if len(wintunEmbedded) > 0 {
 		if localAppData := os.Getenv("LOCALAPPDATA"); localAppData != "" {
-			wdttDir := filepath.Join(localAppData, "wdtt")
-			_ = os.MkdirAll(wdttDir, 0755)
-			localTarget := filepath.Join(wdttDir, "wintun.dll")
+			localTarget := filepath.Join(localAppData, "wdtt", "wintun.dll")
+			_ = os.MkdirAll(filepath.Dir(localTarget), 0755)
 			if err := os.WriteFile(localTarget, wintunEmbedded, 0644); err == nil {
 				log.Printf("[WG] Извлечён встроенный wintun.dll → %s", localTarget)
-				if err := copyFile(localTarget, target); err == nil {
-					return nil
-				}
+				_ = copyFile(localTarget, target)
+				return nil
 			}
 		}
 	}
 
-	// 3) Искать установленный WireGuard/Happ или System32
+	// Искать установленный WireGuard/Happ или System32
 	candidates := findWintunDLLs()
-	if len(candidates) == 0 {
-		return fmt.Errorf("wintun.dll не найден. Переустановите wdtt или установите WireGuard for Windows")
-	}
-
 	for _, src := range candidates {
 		if err := copyFile(src, target); err == nil {
 			log.Printf("[WG] Скопирован wintun.dll из %s", src)
@@ -616,7 +605,7 @@ func ensureWintunDLL(appDir string) error {
 		}
 	}
 
-	return fmt.Errorf("не удалось скопировать wintun.dll из известных путей")
+	return fmt.Errorf("wintun.dll не найден. Переустановите wdtt или установите WireGuard for Windows")
 }
 
 func findWintunDLLs() []string {

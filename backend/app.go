@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
+	"wg-turn-client/core"
 )
 
 // App — Wails App, связующее звено между UI и Orchestrator.
@@ -40,6 +41,7 @@ func (a *App) Startup(ctx context.Context) {
 		// Даём ОС закрыть UDP-сокеты
 		time.Sleep(500 * time.Millisecond)
 	}
+	a.InitVkAuthMode()
 	a.orch = NewOrchestrator(ctx, a.onTrayUpdate)
 	a.startTrayIfNeeded()
 }
@@ -113,6 +115,13 @@ func (a *App) Connect(p ConnectParams) error { return a.orch.Start(p) }
 // Disconnect — остановить сессию.
 func (a *App) Disconnect() { a.orch.Stop() }
 
+// ForceDisconnect — принудительный сброс состояния (если сессия зависла).
+func (a *App) ForceDisconnect() {
+	a.orch.Stop()
+	runtime.EventsEmit(a.ctx, "state_changed", "disconnected")
+	runtime.EventsEmit(a.ctx, "log", "WARN", "Принудительный сброс состояния туннеля")
+}
+
 // IsRunning — работает ли туннель прямо сейчас.
 func (a *App) IsRunning() bool { return a.orch.IsRunning() }
 
@@ -120,6 +129,55 @@ func (a *App) IsRunning() bool { return a.orch.IsRunning() }
 func (a *App) Pause()   { a.orch.Pause() }
 func (a *App) Resume()  { a.orch.Resume() }
 func (a *App) SendCaptchaResult(token string) { a.orch.SendCaptchaResult(token) }
+
+// SendTurnCreds — передаёт TURN-креды от VK-аккаунта в ядро.
+func (a *App) SendTurnCreds(payload string) { a.orch.SendTurnCreds(payload) }
+
+func loadVkAuthMode() string {
+	raw, err := os.ReadFile(filepath.Join(configDir(), "vk_auth_mode"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(raw))
+}
+
+func saveVkAuthMode(mode string) {
+	_ = os.WriteFile(filepath.Join(configDir(), "vk_auth_mode"), []byte(strings.TrimSpace(mode)), 0644)
+}
+
+// GetVkAuthMode — текущий режим VK-авторизации.
+func (a *App) GetVkAuthMode() string { return core.GetVkAuthMode() }
+
+// SetVkAuthMode — установить режим VK-авторизации.
+func (a *App) SetVkAuthMode(mode string) string {
+	result := core.SetVkAuthMode(mode)
+	saveVkAuthMode(result)
+	return result
+}
+
+// InitVkAuthMode — загружает сохранённый режим при старте.
+func (a *App) InitVkAuthMode() {
+	if m := loadVkAuthMode(); m != "" {
+		core.SetVkAuthMode(m)
+	}
+}
+
+// GetVkAuthStatus — статус авторизации VK (для UI).
+func (a *App) GetVkAuthStatus() map[string]interface{} {
+	mode := core.GetVkAuthMode()
+	result := map[string]interface{}{
+		"mode":   mode,
+		"active": mode == "account",
+	}
+	if mode == "account" {
+		count := 0
+		for range core.CountInjectedCreds() {
+			count++
+		}
+		result["cachedHashes"] = count
+	}
+	return result
+}
 
 // startTrayIfNeeded — инициализация Windows tray (запускается из Startup).
 // Безусловно: тред сам спит до первого SetTrayEnabled(true).

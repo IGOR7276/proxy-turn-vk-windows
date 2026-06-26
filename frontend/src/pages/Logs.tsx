@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { IconSearch, IconTrashX, IconCopy, IconTerminal2 } from '@tabler/icons-react';
 import { logStore, type LogEntry, type LogLevel } from '../lib/stores/logStore';
 
-type Filter = 'ALL' | 'INFO' | 'ERROR';
+type Filter = 'ALL' | 'MINI' | 'INFO' | 'ERROR';
 
 const LEVEL_COLOR: Record<LogLevel, string> = {
   INFO:  'var(--text)',
@@ -11,8 +11,76 @@ const LEVEL_COLOR: Record<LogLevel, string> = {
   DEBUG: 'var(--text-3)',
 };
 
+const MINI_COLORS: Record<string, string> = {
+  __workers__: '#4CAF50',
+  __wg__: '#4CAF50',
+  wrap: '#4CAF50',
+  dtls: '#4CAF50',
+  ready: '#4CAF50',
+  creds: '#4CAF50',
+  creds_ok: '#4CAF50',
+  turn: '#4CAF50',
+  state: '#4CAF50',
+  __stats__: '#42A5F5',
+  captcha_start: 'var(--text)',
+  captcha_solve: 'var(--text)',
+  captcha: 'var(--text)',
+};
+
+function miniEntry(entry: LogEntry): LogEntry {
+  const msg = entry.message;
+  const c = entry.count;
+  const kv = entry.key || '';
+
+  if (kv === '__workers__' || msg.includes('Воркеров:')) {
+    const g = msg.match(/групп:\s*(\d+)/);
+    const w = msg.match(/по\s*(\d+)/);
+    const groups = g ? g[1] : '?';
+    const perGroup = w ? w[1] : '?';
+    return { ...entry, message: `[Основной] Хешей=${groups}, Потоков=${+groups * +perGroup} (\u00d7${c})` };
+  }
+  if (kv === 'wrap') {
+    return { ...entry, message: `[WRAP] Ключ выведен из пароля, режим RTP AEAD активен (\u00d7${c})` };
+  }
+  if (kv === 'dtls') {
+    return { ...entry, message: `[DTLS] Рукопожатие (Handshake)... (\u00d7${c})` };
+  }
+  if (kv === 'ready') {
+    return { ...entry, message: `[READY] Туннель активен (\u00d7${c})` };
+  }
+  if (kv === 'creds_ok') {
+    return { ...entry, message: `[ВК] Учетные данные проверены \u2713 (\u00d7${c})` };
+  }
+  if (kv === 'creds') {
+    return { ...entry, message: `[ВК] Получение данных... (\u00d7${c})` };
+  }
+  if (kv === 'turn') {
+    const cleaned = msg.replace(/^\[TURN\] /, '');
+    return { ...entry, message: `[TURN] ${cleaned} (\u00d7${c})` };
+  }
+  if (kv === '__stats__') {
+    return { ...entry, message: `[СТАТИСТИКА] ${msg.replace(/^\[СТАТИСТИКА\]\s*/, '').replace(/^\[STATISTICS\]\s*/, '')} (\u00d7${c})` };
+  }
+  if (kv === 'captcha_start') {
+    return { ...entry, message: `[КАПЧА AUTO] старт цепочки (\u00d7${c})` };
+  }
+  if (kv === 'captcha_solve') {
+    return { ...entry, message: `[КАПЧА AUTO] Go v2 решил капчу (\u00d7${c})` };
+  }
+  if (kv === 'captcha') {
+    return { ...entry, message: `[КАПЧА] Решение капчи... (\u00d7${c})` };
+  }
+  if (kv === 'state') {
+    const cleaned = msg.replace(/^\[СОСТОЯНИЕ\] /, '');
+    return { ...entry, message: `[Состояние] ${cleaned} (\u00d7${c})` };
+  }
+  // fallback: keep original but add count
+  const cleaned = msg.replace(/^\[CORE\] /, '').replace(/^\[STREAM \d+\] /, '');
+  return { ...entry, message: `[${cleaned}] (\u00d7${c})` };
+}
+
 export default function Logs() {
-  const [filter, setFilter] = useState<Filter>('ALL');
+  const [filter, setFilter] = useState<Filter>('MINI');
   const [search, setSearch] = useState('');
   const [entries, setEntries] = useState<LogEntry[]>([]);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -22,8 +90,8 @@ export default function Logs() {
   useEffect(() => logStore.subscribe(setEntries), []);
 
   useEffect(() => {
-    if (autoScroll.current) bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [entries]);
+    if (autoScroll.current && filter !== 'MINI') bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [entries, filter]);
 
   const onScroll = useCallback(() => {
     const el = listRef.current;
@@ -31,14 +99,18 @@ export default function Logs() {
     autoScroll.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
   }, []);
 
-  const visible = entries.filter(e => {
-    if (filter !== 'ALL' && e.level !== filter) return false;
+  const miniEntries = entries
+    .filter(e => (e.priority ?? 99) < 10 && e.key)
+    .map(miniEntry);
+
+  const visible = (filter === 'MINI' ? miniEntries : entries).filter(e => {
+    if (filter !== 'ALL' && filter !== 'MINI' && e.level !== filter) return false;
     if (search && !e.message.toLowerCase().includes(search.toLowerCase())) return false;
     return true;
   });
 
   const handleCopy = () => {
-    const text = visible.map(e => `[${e.time}] [${e.level}] ${e.message}${e.count > 1 ? ` (×${e.count})` : ''}`).join('\n');
+    const text = visible.map(e => e.message).join('\n');
     navigator.clipboard.writeText(text);
   };
 
@@ -62,7 +134,7 @@ export default function Logs() {
         .lg-icon-btn { width: 36px; height: 36px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); cursor: pointer; display: flex; align-items: center; justify-content: center; color: var(--text-3); transition: background 0.12s, color 0.12s; }
         .lg-icon-btn:hover { background: var(--bg-2); color: var(--text); }
         .lg-list { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 0; }
-        .lg-row { display: flex; align-items: baseline; gap: 10px; padding: 5px 18px; font-size: 13px; line-height: 1.5; }
+        .lg-row { display: flex; align-items: baseline; gap: 10px; padding: 5px 18px; font-size: 13px; line-height: 1.5; font-family: 'Geist Mono', monospace; }
         .lg-row:hover { background: var(--bg-2); }
         .lg-time { color: var(--text-4); flex-shrink: 0; font-size: 12px; font-variant-numeric: tabular-nums; }
         .lg-level { flex-shrink: 0; font-weight: 700; font-size: 12px; width: 48px; }
@@ -70,6 +142,10 @@ export default function Logs() {
         .lg-count { flex-shrink: 0; background: var(--seg-bg); border-radius: 20px; padding: 1px 8px; font-size: 11px; color: var(--text-2); }
         .lg-empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--text-4); font-size: 14px; }
         .lg-empty svg { color: var(--text-4); }
+        .lg-mini-row { display: flex; align-items: center; gap: 10px; padding: 5px 18px; font-size: 13px; line-height: 1.5; border-bottom: 1px solid var(--border-2); font-family: 'Geist Mono', monospace; }
+        .lg-mini-arrow { color: var(--accent); flex-shrink: 0; opacity: 0.5; }
+        .lg-mini-msg { flex: 1; word-break: break-all; font-weight: 500; }
+        .lg-mini-badge { flex-shrink: 0; background: rgba(66, 165, 245, 0.15); border-radius: 20px; padding: 1px 8px; font-size: 11px; color: #42A5F5; }
       `}</style>
 
       <div className="lg-wrap">
@@ -91,7 +167,7 @@ export default function Logs() {
             </div>
             <div className="lg-toolbar-right">
               <div className="lg-seg">
-                {(['ALL', 'INFO', 'ERROR'] as Filter[]).map(f => (
+                {(['ALL', 'MINI', 'INFO', 'ERROR'] as Filter[]).map(f => (
                   <button
                     key={f}
                     className={`lg-seg-btn${filter === f ? ' lg-seg-btn--active' : ''}`}
@@ -113,6 +189,16 @@ export default function Logs() {
               <IconTerminal2 size={40} stroke={1.4} />
               {entries.length === 0 ? 'Логи появятся здесь...' : 'Ничего не найдено'}
             </div>
+          ) : filter === 'MINI' ? (
+            <div className="lg-list">
+              {visible.map(e => (
+                <div key={e.id} className="lg-mini-row">
+                  <span className="lg-mini-arrow">{'>'}</span>
+                  <span className="lg-mini-msg" style={{ color: MINI_COLORS[e.key || ''] || 'var(--text)' }}>{e.message}</span>
+                  <span className="lg-mini-badge">{'\u00d7'}{e.count}</span>
+                </div>
+              ))}
+            </div>
           ) : (
             <div className="lg-list" ref={listRef} onScroll={onScroll}>
               {visible.map(e => (
@@ -120,7 +206,7 @@ export default function Logs() {
                   <span className="lg-time">{e.time}</span>
                   <span className="lg-level" style={{ color: LEVEL_COLOR[e.level] }}>{e.level}</span>
                   <span className="lg-msg">{e.message}</span>
-                  {e.count > 1 && <span className="lg-count">×{e.count}</span>}
+                  {e.count > 1 && <span className="lg-count">{'\u00d7'}{e.count}</span>}
                 </div>
               ))}
               <div ref={bottomRef} />
@@ -131,4 +217,3 @@ export default function Logs() {
     </>
   );
 }
-

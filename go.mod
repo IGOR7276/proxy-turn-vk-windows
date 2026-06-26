@@ -3,7 +3,11 @@ module wdtt-desktop
 go 1.26
 
 require (
+	github.com/bogdanfinn/fhttp v0.6.8
+	github.com/bogdanfinn/tls-client v1.14.0
+	github.com/google/uuid v1.6.0
 	github.com/lxn/win v0.0.0-20210218163916-a377121e959e
+	github.com/wailsapp/go-webview2 v1.0.22
 	github.com/wailsapp/wails/v2 v2.12.0
 	golang.org/x/crypto v0.52.0
 	golang.org/x/image v0.12.0
@@ -17,15 +21,12 @@ require (
 	github.com/bdandy/go-errors v1.2.2 // indirect
 	github.com/bdandy/go-socks4 v1.2.3 // indirect
 	github.com/bep/debounce v1.2.1 // indirect
-	github.com/bogdanfinn/fhttp v0.6.8 // indirect
 	github.com/bogdanfinn/quic-go-utls v1.0.9-utls // indirect
-	github.com/bogdanfinn/tls-client v1.14.0 // indirect
 	github.com/bogdanfinn/utls v1.7.7-barnius // indirect
 	github.com/bogdanfinn/websocket v1.5.5-barnius // indirect
 	github.com/cbeuw/connutil v1.0.1 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/godbus/dbus/v5 v5.1.0 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/jchv/go-winloader v0.0.0-20210711035445-715c2860da7e // indirect
 	github.com/klauspost/compress v1.18.2 // indirect
@@ -52,7 +53,6 @@ require (
 	github.com/tkrajina/go-reflector v0.5.8 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/valyala/fasttemplate v1.2.2 // indirect
-	github.com/wailsapp/go-webview2 v1.0.22 // indirect
 	github.com/wailsapp/mimetype v1.4.1 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
 	golang.org/x/net v0.54.0 // indirect

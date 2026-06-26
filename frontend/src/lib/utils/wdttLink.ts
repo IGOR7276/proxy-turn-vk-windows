@@ -9,24 +9,29 @@ export interface WdttLink {
 // wdtt://<IP>:<DTLS>:<WG>:<PROXY>:<PASSWORD>[:<HASH1>,<HASH2>,...][#название]
 export function parseWdttUrl(raw: string): WdttLink | null {
   try {
-    let str = raw.trim();
-    // извлекаем #название
-    let name = 'Server';
-    const hashIdx = str.indexOf('#');
-    if (hashIdx !== -1) {
-      const candidate = str.slice(hashIdx + 1).trim();
-      if (candidate) name = candidate;
-      str = str.slice(0, hashIdx);
-    }
-    const stripped = str.replace(/^wdtt:\/\//, '');
+    const stripped = raw.trim().replace(/^wdtt:\/\//, '');
     const parts = stripped.split(':');
     if (parts.length < 5) return null;
     const ip = parts[0];
     const dtlsPort = parts[1];
-    const password = parts[4];
-    const hashes = parts[5]
-      ? parts[5].split(',').map(h => h.trim()).filter(Boolean)
-      : [];
+    const tail = parts.slice(4).join(':');
+    let name = 'Server';
+    const hashIdx = tail.lastIndexOf('#');
+    let passwordAndHashes = tail;
+    if (hashIdx !== -1) {
+      const candidate = tail.slice(hashIdx + 1).trim();
+      if (candidate) name = candidate;
+      passwordAndHashes = tail.slice(0, hashIdx);
+    }
+    const colonIdx = passwordAndHashes.lastIndexOf(':');
+    let password: string;
+    let hashes: string[] = [];
+    if (colonIdx !== -1) {
+      password = passwordAndHashes.slice(0, colonIdx);
+      hashes = passwordAndHashes.slice(colonIdx + 1).split(',').map(h => h.trim()).filter(Boolean);
+    } else {
+      password = passwordAndHashes;
+    }
     if (!ip || !dtlsPort || !password) return null;
     return { ip, dtlsPort, password, hashes, name };
   } catch {

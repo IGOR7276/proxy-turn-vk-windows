@@ -53,6 +53,10 @@ function useWailsEvents() {
       EventsOn('event', (name: unknown) => {
         if (name === 'wg_config') tunnelStore.set('connected');
       }),
+      EventsOn('vk_auth_required', (hash: unknown) => {
+        logStore.push('WARN', `Требуется вход через VK для хеша: ${String(hash ?? '')}`);
+        window.dispatchEvent(new CustomEvent('vk_auth_required', { detail: String(hash ?? '') }));
+      }),
     ];
     return () => offs.forEach(off => off());
   }, []);

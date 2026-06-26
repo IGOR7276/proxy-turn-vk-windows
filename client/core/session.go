@@ -90,7 +90,7 @@ func RunSession(
 	}
 	for i := 0; i < len(creds.TurnURLs); i++ {
 		selectedURL := creds.TurnURLs[(startIdx+i)%len(creds.TurnURLs)]
-		urlhost, urlport, err := net.SplitHostPort(selectedURL)
+		urlhost, urlport, err := net.SplitHostPort(strings.TrimPrefix(strings.TrimPrefix(selectedURL, "turn:"), "turns:"))
 		if err != nil {
 			turnErr = err
 			continue

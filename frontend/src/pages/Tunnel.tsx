@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   IconHash,
@@ -23,7 +23,8 @@ import { tunnelStore } from '../lib/stores/tunnelStore';
 import { toastStore } from '../lib/stores/toastStore';
 import { wdttLinkStore } from '../lib/utils/wdttLink';
 import { stripVkUrl } from '../lib/utils/qwdttParser';
-import { SaveProfile, Connect as WailsConnect, Disconnect as WailsDisconnect } from '../../wailsjs/go/backend/App';
+import { SaveProfile, Connect as WailsConnect, Disconnect as WailsDisconnect, ForceDisconnect, GetVkAuthMode, VkLogin as BackendVkLogin, VkCallJoin } from '../../wailsjs/go/backend/App';
+import { EventsOn, EventsOff } from '../../wailsjs/runtime/runtime';
 import type { Server, TunnelState, AppSettings } from '../lib/types';
 import { resolveDnsUpstream } from '../lib/types';
 
@@ -52,6 +53,12 @@ export default function Tunnel() {
   const [tunnelState, setTunnelState] = useState<TunnelState>(() => tunnelStore.get());
   useEffect(() => tunnelStore.subscribe(setTunnelState), []);
 
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
+
+  const tunnelStateRef = useRef(tunnelState);
+  tunnelStateRef.current = tunnelState;
+
   const [settings, setSettings] = useState(() => settingsStore.get());
   const [hashOpen, setHashOpen] = useState(false);
   const [secretsOpen, setSecretsOpen] = useState(false);
@@ -60,6 +67,12 @@ export default function Tunnel() {
   const [addServerOpen, setAddServerOpen] = useState(false);
   const [editServer, setEditServer] = useState<Server | null>(null);
   const [reconnectAt, setReconnectAt] = useState(0);
+  const [vkAuthMode, setVkAuthMode] = useState<'anonymous' | 'account'>('anonymous');
+  useEffect(() => {
+    GetVkAuthMode().then(mode => {
+      setVkAuthMode(mode as 'anonymous' | 'account');
+    }).catch(() => {});
+  }, []);
 
   // wdtt:// paste handler (only if linkMode is on)
   useEffect(() => {
@@ -98,10 +111,11 @@ export default function Tunnel() {
   }, []);
 
   const doConnect = async () => {
-    if (!selected) return;
+    const cur = selectedRef.current;
+    if (!cur) return;
     const s = settingsStore.get();
-    const useGlobal = selected.useGlobalHashes;
-    const filled = (useGlobal ? s.hashes : selected.hashes).map(h => stripVkUrl(h)).filter(Boolean);
+    const useGlobal = cur.useGlobalHashes;
+    const filled = (useGlobal ? s.hashes : cur.hashes).map(h => stripVkUrl(h)).filter(Boolean);
     if (filled.length === 0) {
       toastStore.show(useGlobal
         ? 'Добавьте глобальные хеши или заполните хеши профиля'
@@ -111,10 +125,49 @@ export default function Tunnel() {
     tunnelStore.set('connecting');
     const dnsUpstream = resolveDnsUpstream(s);
     try {
+      if (vkAuthMode === 'account') {
+        toastStore.show('Вход в VK...', 15000);
+        await new Promise<void>((resolve, reject) => {
+          const loginTimeout = setTimeout(() => {
+            EventsOff('vk_login_done');
+            reject(new Error('Таймаут входа в VK'));
+          }, 60000);
+          BackendVkLogin().catch(err => {
+            clearTimeout(loginTimeout);
+            EventsOff('vk_login_done');
+            reject(err);
+          });
+          EventsOn('vk_login_done', (result: string) => {
+            clearTimeout(loginTimeout);
+            EventsOff('vk_login_done');
+            if (result) resolve();
+            else reject(new Error('Вход в VK не завершён'));
+          });
+        });
+        toastStore.show('Получаю TURN креды VK...', 15000);
+        await new Promise<void>((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            EventsOff('vk_turn_creds');
+            reject(new Error('Таймаут получения TURN кредов'));
+          }, 30000);
+          VkCallJoin(filled[0]).catch(err => {
+            clearTimeout(timeout);
+            EventsOff('vk_turn_creds');
+            reject(err);
+          });
+          EventsOn('vk_turn_creds', (payload: string) => {
+            clearTimeout(timeout);
+            EventsOff('vk_turn_creds');
+            if (payload) resolve();
+            else reject(new Error('Не удалось получить TURN креды'));
+          });
+        });
+      }
       await WailsConnect({
-        profile: selected.name,
+        profile: cur.name,
         captchaMode: 'auto',
-        workers: selected.power || 9,
+        vkAuthMode: vkAuthMode,
+        workers: cur.power || 9,
         mtu: s.mtu || 1280,
         hashes: filled,
         autoWG: s.autoWG,
@@ -133,11 +186,11 @@ export default function Tunnel() {
   };
 
   const handleConnect = async () => {
-    if (!selected) {
+    if (!selectedRef.current) {
       setAddServerOpen(true);
       return;
     }
-    if (tunnelState === 'idle') {
+    if (tunnelStateRef.current === 'idle') {
       if (Date.now() < reconnectAt) {
         const secs = Math.ceil((reconnectAt - Date.now()) / 1000);
         toastStore.show(`Подождите ${secs} сек.`, 2000);
@@ -145,11 +198,19 @@ export default function Tunnel() {
       }
       toastStore.show('Запускаю туннель', 2000);
       await doConnect();
-    } else if (tunnelState === 'connected' || tunnelState === 'connecting') {
+    } else if (tunnelStateRef.current === 'connected' || tunnelStateRef.current === 'connecting') {
       tunnelStore.set('disconnecting');
-      await WailsDisconnect();
+      try {
+        await WailsDisconnect();
+      } catch {
+        await ForceDisconnect();
+      }
       tunnelStore.set('idle');
       setReconnectAt(Date.now() + 4000);
+    } else {
+      // stuck в disconnecting — force reset
+      await ForceDisconnect();
+      tunnelStore.set('idle');
     }
   };
 

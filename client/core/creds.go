@@ -270,6 +270,10 @@ func fetchVkCredsSerialized(ctx context.Context, link string, streamID int) (str
 // ─── Main credential fetcher (rotates through stable credential sets) ───
 
 func fetchVkCreds(ctx context.Context, link string, streamID int) (string, string, []string, error) {
+	if GetVkAuthMode() == "account" {
+		return fetchAccountVkCreds(ctx, link, streamID)
+	}
+
 	if time.Now().Unix() < globalCaptchaLockout.Load() {
 		return "", "", nil, fmt.Errorf("CAPTCHA_WAIT_REQUIRED: global lockout active")
 	}
