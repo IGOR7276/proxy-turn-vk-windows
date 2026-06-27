@@ -29,7 +29,6 @@ const MINI_COLORS: Record<string, string> = {
 
 function miniEntry(entry: LogEntry): LogEntry {
   const msg = entry.message;
-  const c = entry.count;
   const kv = entry.key || '';
 
   if (kv === '__workers__' || msg.includes('Воркеров:')) {
@@ -37,47 +36,50 @@ function miniEntry(entry: LogEntry): LogEntry {
     const w = msg.match(/по\s*(\d+)/);
     const groups = g ? g[1] : '?';
     const perGroup = w ? w[1] : '?';
-    return { ...entry, message: `[Основной] Хешей=${groups}, Потоков=${+groups * +perGroup} (\u00d7${c})` };
+    return { ...entry, message: `[Основной] Хешей=${groups}, Потоков=${+groups * +perGroup}` };
   }
   if (kv === 'wrap') {
-    return { ...entry, message: `[WRAP] Ключ выведен из пароля, режим RTP AEAD активен (\u00d7${c})` };
+    return { ...entry, message: `[WRAP] Ключ выведен из пароля, режим RTP AEAD активен` };
   }
   if (kv === 'dtls') {
-    return { ...entry, message: `[DTLS] Рукопожатие (Handshake)... (\u00d7${c})` };
+    return { ...entry, message: `[DTLS] Рукопожатие (Handshake)...` };
   }
   if (kv === 'ready') {
-    return { ...entry, message: `[READY] Туннель активен (\u00d7${c})` };
+    return { ...entry, message: `[READY] Туннель активен` };
   }
   if (kv === 'creds_ok') {
-    return { ...entry, message: `[ВК] Учетные данные проверены \u2713 (\u00d7${c})` };
+    return { ...entry, message: `[ВК] Учетные данные проверены \u2713` };
   }
   if (kv === 'creds') {
-    return { ...entry, message: `[ВК] Получение данных... (\u00d7${c})` };
+    return { ...entry, message: `[ВК] Получение данных...` };
   }
   if (kv === 'turn') {
     const cleaned = msg.replace(/^\[TURN\] /, '');
-    return { ...entry, message: `[TURN] ${cleaned} (\u00d7${c})` };
+    return { ...entry, message: `[TURN] ${cleaned}` };
   }
   if (kv === '__stats__') {
-    return { ...entry, message: `[СТАТИСТИКА] ${msg.replace(/^\[СТАТИСТИКА\]\s*/, '').replace(/^\[STATISTICS\]\s*/, '')} (\u00d7${c})` };
+    return { ...entry, message: `[СТАТИСТИКА] ${msg.replace(/^\[СТАТИСТИКА\]\s*/, '').replace(/^\[STATISTICS\]\s*/, '')}` };
   }
   if (kv === 'captcha_start') {
-    return { ...entry, message: `[КАПЧА AUTO] старт цепочки (\u00d7${c})` };
+    return { ...entry, message: `[КАПЧА AUTO] старт цепочки` };
   }
   if (kv === 'captcha_solve') {
-    return { ...entry, message: `[КАПЧА AUTO] Go v2 решил капчу (\u00d7${c})` };
+    return { ...entry, message: `[КАПЧА AUTO] Go v2 решил капчу` };
   }
   if (kv === 'captcha') {
-    return { ...entry, message: `[КАПЧА] Решение капчи... (\u00d7${c})` };
+    return { ...entry, message: `[КАПЧА] Решение капчи...` };
   }
   if (kv === 'state') {
     const cleaned = msg.replace(/^\[СОСТОЯНИЕ\] /, '');
-    return { ...entry, message: `[Состояние] ${cleaned} (\u00d7${c})` };
+    return { ...entry, message: `[Состояние] ${cleaned}` };
   }
-  // fallback: keep original but add count
+  // fallback
   const cleaned = msg.replace(/^\[CORE\] /, '').replace(/^\[STREAM \d+\] /, '');
-  return { ...entry, message: `[${cleaned}] (\u00d7${c})` };
+  return { ...entry, message: `[${cleaned}]` };
 }
+
+let seqIdCounter = 1000000;
+function seqId() { return seqIdCounter++; }
 
 export default function Logs() {
   const [filter, setFilter] = useState<Filter>('MINI');
@@ -139,7 +141,6 @@ export default function Logs() {
         .lg-time { color: var(--text-4); flex-shrink: 0; font-size: 12px; font-variant-numeric: tabular-nums; }
         .lg-level { flex-shrink: 0; font-weight: 700; font-size: 12px; width: 48px; }
         .lg-msg { flex: 1; word-break: break-all; color: var(--text); }
-        .lg-count { flex-shrink: 0; background: var(--seg-bg); border-radius: 20px; padding: 1px 8px; font-size: 11px; color: var(--text-2); }
         .lg-empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--text-4); font-size: 14px; }
         .lg-empty svg { color: var(--text-4); }
         .lg-mini-row { display: flex; align-items: center; gap: 10px; padding: 5px 18px; font-size: 13px; line-height: 1.5; border-bottom: 1px solid var(--border-2); font-family: 'Geist Mono', monospace; }
@@ -195,18 +196,22 @@ export default function Logs() {
                 <div key={e.id} className="lg-mini-row">
                   <span className="lg-mini-arrow">{'>'}</span>
                   <span className="lg-mini-msg" style={{ color: MINI_COLORS[e.key || ''] || 'var(--text)' }}>{e.message}</span>
-                  <span className="lg-mini-badge">{'\u00d7'}{e.count}</span>
+                  {e.count > 1 && <span className="lg-mini-badge">{'\u00d7'}{e.count}</span>}
                 </div>
               ))}
             </div>
           ) : (
             <div className="lg-list" ref={listRef} onScroll={onScroll}>
-              {visible.map(e => (
+              {visible.flatMap(e => {
+                if (e.count <= 1) return [e];
+                const expanded: LogEntry[] = [];
+                for (let i = 0; i < e.count; i++) expanded.push({ ...e, id: seqId() });
+                return expanded;
+              }).map(e => (
                 <div key={e.id} className="lg-row">
                   <span className="lg-time">{e.time}</span>
                   <span className="lg-level" style={{ color: LEVEL_COLOR[e.level] }}>{e.level}</span>
                   <span className="lg-msg">{e.message}</span>
-                  {e.count > 1 && <span className="lg-count">{'\u00d7'}{e.count}</span>}
                 </div>
               ))}
               <div ref={bottomRef} />

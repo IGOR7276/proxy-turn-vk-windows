@@ -61,6 +61,7 @@ func main() {
 	dnsList := flag.String("dns", "", "upstream DNS для локального прокси. Дефолт '8.8.8.8,1.1.1.1'")
 	noDNSProxy := flag.Bool("no-dns-proxy", false, "не поднимать локальный DNS-прокси")
 	mtu := flag.Int("mtu", 1280, "MTU для WireGuard")
+	excludeDomains := flag.String("exclude-domains", "", "домены для исключения из туннеля (через запятую, поддерживает wildcard *.example.com)")
 
 	flag.Parse()
 
@@ -86,23 +87,34 @@ func main() {
 		}
 	}
 
+	var excludeDomainsList []string
+	if *excludeDomains != "" {
+		for _, d := range strings.Split(*excludeDomains, ",") {
+			d = strings.TrimSpace(d)
+			if d != "" {
+				excludeDomainsList = append(excludeDomainsList, d)
+			}
+		}
+	}
+
 	cfg := core.Config{
-		PeerAddr:    *peerAddr,
-		Password:    *connPassword,
-		Hashes:      hashes,
-		Listen:      *listen,
-		TurnHost:    *host,
-		TurnPort:    *port,
-		DeviceID:    *deviceID,
-		Workers:     *numW,
-		CaptchaMode: *captchaMode,
-		Fingerprint: *fingerprint,
-		ClientIDs:   *clientIdsFlag,
-		WGInterface: *wgInterface,
-		AutoWG:      *autoWG,
-		DNSUpstream: customDNS,
-		NoDNSProxy:  *noDNSProxy,
-		WGConfigMTU: *mtu,
+		PeerAddr:       *peerAddr,
+		Password:       *connPassword,
+		Hashes:         hashes,
+		Listen:         *listen,
+		TurnHost:       *host,
+		TurnPort:       *port,
+		DeviceID:       *deviceID,
+		Workers:        *numW,
+		CaptchaMode:    *captchaMode,
+		Fingerprint:    *fingerprint,
+		ClientIDs:      *clientIdsFlag,
+		WGInterface:    *wgInterface,
+		AutoWG:         *autoWG,
+		DNSUpstream:    customDNS,
+		NoDNSProxy:     *noDNSProxy,
+		WGConfigMTU:    *mtu,
+		ExcludeDomains: excludeDomainsList,
 	}
 
 	// Контекст с отменой по SIGTERM/SIGINT

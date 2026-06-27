@@ -23,7 +23,7 @@ import { tunnelStore } from '../lib/stores/tunnelStore';
 import { toastStore } from '../lib/stores/toastStore';
 import { wdttLinkStore } from '../lib/utils/wdttLink';
 import { stripVkUrl } from '../lib/utils/qwdttParser';
-import { SaveProfile, Connect as WailsConnect, Disconnect as WailsDisconnect, ForceDisconnect, GetVkAuthMode, VkLogin as BackendVkLogin, VkCallJoin } from '../../wailsjs/go/backend/App';
+import { SaveProfile, Connect as WailsConnect, Disconnect as WailsDisconnect, ForceDisconnect, GetVkAuthMode, VkLogin as BackendVkLogin, VkCallJoin, GetExcludeDomains } from '../../wailsjs/go/backend/App';
 import { EventsOn, EventsOff } from '../../wailsjs/runtime/runtime';
 import type { Server, TunnelState, AppSettings } from '../lib/types';
 import { resolveDnsUpstream } from '../lib/types';
@@ -74,10 +74,11 @@ export default function Tunnel() {
     }).catch(() => {});
   }, []);
 
-  // wdtt:// paste handler (only if linkMode is on)
+  // wdtt:// paste handler (only if linkMode is on).
+  // Зависимость от settings.linkMode — если пользователь включит режим ссылки
+  // после монтирования компонента, подписка будет установлена повторно.
   useEffect(() => {
-    const cur = settingsStore.get();
-    if (!cur.linkMode) return;
+    if (!settings.linkMode) return;
     return wdttLinkStore.subscribe((link) => {
       if (!link) return;
       const consumed = wdttLinkStore.consume();
@@ -108,7 +109,7 @@ export default function Tunnel() {
         finish(false);
       }
     });
-  }, []);
+  }, [settings.linkMode]);
 
   const doConnect = async () => {
     const cur = selectedRef.current;
@@ -163,6 +164,17 @@ export default function Tunnel() {
           });
         });
       }
+      // Загружаем список доменных исключений для текущей сессии.
+      // Список хранится на бэкенде в файле, грузим при каждом подключении
+      // чтобы подхватить изменения, сделанные через UI между сессиями.
+      let excludeDomains: string[] = [];
+      try {
+        const list = await GetExcludeDomains();
+        excludeDomains = Array.isArray(list) ? list : [];
+      } catch {
+        excludeDomains = [];
+      }
+
       await WailsConnect({
         profile: cur.name,
         captchaMode: 'auto',
@@ -174,6 +186,7 @@ export default function Tunnel() {
         noDNSProxy: !s.dnsProxyEnabled,
         dnsUpstream: dnsUpstream.length > 0 ? dnsUpstream : undefined,
         wgInterface: s.wgInterface || 'WDTT',
+        excludeDomains: excludeDomains.length > 0 ? excludeDomains : undefined,
       });
       navigate('/logs');
     } catch (err) {

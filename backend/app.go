@@ -92,6 +92,9 @@ func (a *App) SetCloseAction(action string, remember bool) {
 	case "hide":
 		runtime.WindowHide(a.ctx)
 	case "exit":
+		if a.orch != nil {
+			a.orch.Stop()
+		}
 		if !remember {
 			a.allowExit.Store(true)
 		}
@@ -181,6 +184,14 @@ func (a *App) GetVkAuthStatus() map[string]interface{} {
 
 // startTrayIfNeeded — инициализация Windows tray (запускается из Startup).
 // Безусловно: тред сам спит до первого SetTrayEnabled(true).
+// Shutdown вызывается Wails при завершении приложения (OnShutdown).
+// Останавливает туннель (WireGuard, DNS-прокси, маршруты), если он был активен.
+func (a *App) Shutdown(ctx context.Context) {
+	if a.orch != nil {
+		a.orch.Stop()
+	}
+}
+
 func (a *App) startTrayIfNeeded() {
 	startTray(a.trayIcon,
 		func() { // onShow — открыть/показать окно
@@ -194,6 +205,9 @@ func (a *App) startTrayIfNeeded() {
 			}
 		},
 		func() { // onQuit — закрыть приложение полностью (обходит OnBeforeClose)
+			if a.orch != nil {
+				a.orch.Stop()
+			}
 			a.allowExit.Store(true)
 			runtime.Quit(a.ctx)
 		},

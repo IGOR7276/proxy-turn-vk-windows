@@ -3,7 +3,7 @@
 
 package core
 
-func SetupWindowsWireGuard(rawConf, ifaceName string, customDNS []string) error {
+func SetupWindowsWireGuard(rawConf, ifaceName string, customDNS []string, excludeDomains []string) error {
 	return nil
 }
 

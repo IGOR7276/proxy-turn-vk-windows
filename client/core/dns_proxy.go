@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -36,6 +37,11 @@ type dnsProxy struct {
 	forwards  atomic.Uint64
 	responses atomic.Uint64
 	failures  atomic.Uint64
+
+	// onExcludedDomain вызывается для DNS-запросов к исключённым доменам
+	// (перед отправкой на upstream через туннель). Должен вернуть список
+	// резолвнутых IP — excluder добавит /32 маршруты для них.
+	onExcludedDomain func(hostname string) []net.IP
 }
 
 // newDNSProxy создаёт прокси с заданным режимом (UDP) и upstream-ами.
@@ -49,8 +55,19 @@ func newDNSProxy(upstream []string, sourceIP string) *dnsProxy {
 	return &dnsProxy{
 		upstream: upstream,
 		sourceIP: sourceIP,
-		timeout:  5 * time.Second,
+		// Таймаут 10s: DNS-запросы идут через TURN-туннель (2× round-trip),
+		// при перегрузке relay-ов RTT может достигать 1-2s. 5s было слишком мало.
+		timeout: 10 * time.Second,
 	}
+}
+
+// SetExcludedDomainHandler устанавливает callback, вызываемый для DNS-запросов
+// к исключённым доменам (до отправки на upstream). Используется для добавления
+// /32 маршрутов через оригинальный шлюз.
+func (p *dnsProxy) SetExcludedDomainHandler(fn func(hostname string) []net.IP) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.onExcludedDomain = fn
 }
 
 // Start запускает прокси на :53 (UDP, все интерфейсы — ловит и 127.0.0.1,
@@ -118,10 +135,43 @@ func (p *dnsProxy) serve() {
 // Если все upstream-ы не ответили — запрос тихо отбрасывается (клиент
 // получит таймаут на своей стороне). На каждый запрос пишем лог с
 // qid (transaction ID из DNS-заголовка) для отладки.
+//
+// Для исключённых доменов (wildcard-паттерны) вызывается onExcludedDomain
+// callback: excluder резолвит поддомен через upstream DNS (через туннель),
+// добавляет /32 маршрут через оригинальный шлюз, и возвращает IP.
+// Мы строим DNS-ответ из этих IP, чтобы клиент получил ответ сразу —
+// последующий трафик пойдёт через /32 маршрут (мимо туннеля).
 func (p *dnsProxy) handleQuery(query []byte, clientAddr net.Addr) {
 	qid := uint16(0)
 	if len(query) >= 2 {
 		qid = uint16(query[0])<<8 | uint16(query[1])
+	}
+
+	// Проверяем, матчит ли домен wildcard-паттерн (или любой другой).
+	// Для точных паттернов excluder уже пререзолвил домен при Start() —
+	// /32 маршруты добавлены, можно просто форвардить запрос как обычно.
+	p.mu.Lock()
+	handler := p.onExcludedDomain
+	listener := p.listener
+	p.mu.Unlock()
+
+	if handler != nil {
+		if domain := extractDNSQueryDomain(query); domain != "" {
+			ips := handler(domain)
+			if len(ips) > 0 {
+				// Домен матчит исключение (wildcard) и зарезолвлен — строим
+				// ответ вручную из полученных IP, чтобы клиент получил
+				// ответ сразу. /32 маршрут уже добавлен excluder-ом.
+				resp := buildDNSResponseWithA(query, ips)
+				if resp != nil {
+					p.responses.Add(1)
+					if listener != nil {
+						listener.WriteTo(resp, clientAddr)
+					}
+					return
+				}
+			}
+		}
 	}
 
 	type result struct {
@@ -206,5 +256,113 @@ func (p *dnsProxy) forward(query []byte, server string) ([]byte, error) {
 		return nil, fmt.Errorf("read %s: %w", server, err)
 	}
 	return resp[:n], nil
+}
+
+// extractDNSQueryDomain извлекает доменное имя из DNS-запроса (QNAME).
+// Поддерживает стандартный формат с length-prefixed labels.
+// Возвращает пустую строку при ошибке парсинга.
+func extractDNSQueryDomain(query []byte) string {
+	if len(query) < 13 {
+		return ""
+	}
+	// Header = 12 bytes, QNAME начинается с offset 12.
+	offset := 12
+	var labels []string
+	visited := 0
+	for offset < len(query) {
+		l := int(query[offset])
+		if l == 0 {
+			break
+		}
+		if l&0xC0 != 0 {
+			// Compression pointer — не ожидаем в query, но защищаемся.
+			return ""
+		}
+		offset++
+		if offset+l > len(query) {
+			return ""
+		}
+		labels = append(labels, string(query[offset:offset+l]))
+		offset += l
+		visited++
+		if visited > 64 {
+			return "" // защита от слишком длинных имён
+		}
+	}
+	return strings.Join(labels, ".")
+}
+
+// buildDNSResponseWithA собирает минимальный DNS-ответ с A-записями
+// на основе исходного запроса. Используется для исключённых доменов,
+// резолвленных через оригинальный DNS — чтобы клиент получил ответ сразу,
+// без обращения к upstream через туннель.
+//
+// Копирует ID из запроса, выставляет флаги QR=1 (response), AA=1, RD=1, RA=1,
+// RCODE=0. QDCOUNT=1 (echo question), ANCOUNT=N (число IP).
+func buildDNSResponseWithA(query []byte, ips []net.IP) []byte {
+	if len(query) < 13 || len(ips) == 0 {
+		return nil
+	}
+
+	// Header: 12 bytes
+	resp := make([]byte, 12, 64+len(ips)*16)
+	// ID — копия из запроса
+	resp[0] = query[0]
+	resp[1] = query[1]
+	// Flags: QR=1, RD=1, RA=1, RCODE=0 → 0x8180
+	resp[2] = 0x81
+	resp[3] = 0x80
+	// QDCOUNT = 1
+	resp[4] = 0x00
+	resp[5] = 0x01
+	// ANCOUNT = N
+	ancount := uint16(len(ips))
+	resp[6] = byte(ancount >> 8)
+	resp[7] = byte(ancount & 0xFF)
+	// NSCOUNT, ARCOUNT = 0
+	resp[8] = 0x00
+	resp[9] = 0x00
+	resp[10] = 0x00
+	resp[11] = 0x00
+
+	// Question Section: копируем QNAME + QTYPE + QCLASS из запроса.
+	qEnd := 12
+	for qEnd < len(query) {
+		l := int(query[qEnd])
+		if l == 0 {
+			qEnd++ // включая нулевой терминатор
+			break
+		}
+		if l&0xC0 != 0 {
+			return nil
+		}
+		qEnd += 1 + l
+	}
+	if qEnd+4 > len(query) {
+		return nil
+	}
+	resp = append(resp, query[12:qEnd+4]...)
+
+	// Answer Section: по одной A-записи на каждый IP.
+	for _, ip := range ips {
+		v4 := ip.To4()
+		if v4 == nil {
+			continue // пропускаем IPv6 (для A-записи не подходит)
+		}
+		// NAME: pointer на QNAME в offset 12 → 0xC00C
+		resp = append(resp, 0xC0, 0x0C)
+		// TYPE = A (1)
+		resp = append(resp, 0x00, 0x01)
+		// CLASS = IN (1)
+		resp = append(resp, 0x00, 0x01)
+		// TTL = 300 (5 минут)
+		resp = append(resp, 0x00, 0x00, 0x01, 0x2C)
+		// RDLENGTH = 4
+		resp = append(resp, 0x00, 0x04)
+		// RDATA = IPv4 address
+		resp = append(resp, v4...)
+	}
+
+	return resp
 }
 

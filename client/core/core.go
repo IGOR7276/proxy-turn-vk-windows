@@ -30,6 +30,11 @@ type Config struct {
 	DNSUpstream  []string // -dns (если пусто — дефолт 8.8.8.8,1.1.1.1)
 	NoDNSProxy   bool     // -no-dns-proxy
 	WGConfigMTU  int      // MTU для патча конфига (0 = default 1280)
+
+	// ExcludeDomains — список паттернов доменов для исключения из туннеля.
+	// Поддерживает wildcards (*.example.com). Гибридный режим: DNS-прокси
+	// резолвит исключённые домены через оригинальный DNS + добавляет /32 маршруты.
+	ExcludeDomains []string
 }
 
 // EventType — тип события от ядра.
@@ -311,7 +316,7 @@ func (c *Core) Start(ctx context.Context) (<-chan Event, error) {
 			c.emit(Event{Type: EventEvent, Name: "wg_config", Data: finalConf})
 
 			if c.cfg.AutoWG {
-				if err := SetupWindowsWireGuard(finalConf, c.cfg.WGInterface, customDNS); err != nil {
+				if err := SetupWindowsWireGuard(finalConf, c.cfg.WGInterface, customDNS, c.cfg.ExcludeDomains); err != nil {
 					log.Printf("[CORE] WG setup error: %v", err)
 					c.emit(Event{Type: EventError, Msg: err.Error()})
 					return

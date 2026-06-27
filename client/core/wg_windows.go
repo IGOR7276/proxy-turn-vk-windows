@@ -6,8 +6,10 @@ package core
 import (
 	_ "embed"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log"
 	"net"
@@ -18,11 +20,69 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
+	"unsafe"
 
+	"golang.org/x/sys/windows"
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/tun"
 )
+
+var (
+	// wintunAPI provides direct access to wintun.dll for adapter lifecycle management.
+	wintunMod          = syscall.NewLazyDLL("wintun.dll")
+	procWintunOpen     = wintunMod.NewProc("WintunOpenAdapter")
+	procWintunClose    = wintunMod.NewProc("WintunCloseAdapter")
+	procWintunDelete   = wintunMod.NewProc("WintunDeleteAdapter")
+)
+
+// setFixedTUNGUID устанавливает фиксированный GUID для wintun-адаптера на основе
+// имени интерфейса. Без этого wireguard-go/tun.CreateTUN передаёт nil GUID,
+// и Windows генерирует новый GUID при каждом подключении, создавая новый адаптер
+// ("WDTT", "WDTT 2", "WDTT 3"…). С фиксированным GUID один и тот же адаптер
+// переиспользуется.
+func setFixedTUNGUID(name string) {
+	h := fnv.New128a()
+	h.Write([]byte(name))
+	sum := h.Sum(nil)
+	tun.WintunStaticRequestedGUID = &windows.GUID{
+		Data1: binary.LittleEndian.Uint32(sum[0:4]),
+		Data2: binary.LittleEndian.Uint16(sum[4:6]),
+		Data3: binary.LittleEndian.Uint16(sum[6:8]),
+		Data4: [8]byte{sum[8], sum[9], sum[10], sum[11], sum[12], sum[13], sum[14], sum[15]},
+	}
+	log.Printf("[WG] Установлен фиксированный GUID для TUN-адаптера %s", name)
+}
+
+// cleanupWintunAdapters удаляет ВСЕ существующие wintun-адаптеры с заданным именем
+// (и их числовыми суффиксами) через wintun API, а затем PowerShell как fallback.
+// Без этого каждый вызов tun.CreateTUN() создаёт новый адаптер ("WDTT", "WDTT 2"…),
+// т.к. wintun использует случайный GUID при каждом создании, а Close() не удаляет
+// адаптер из Windows.
+func cleanupWintunAdapters(name string) {
+	log.Printf("[WG] Очистка старых TUN-адаптеров %s...", name)
+
+	// Method 1: wintun API — WintunOpenAdapter + WintunDeleteAdapter в цикле
+	namePtr, err := syscall.UTF16PtrFromString(name)
+	if err != nil {
+		log.Printf("[WG] cleanupWintunAdapters: UTF16PtrFromString error: %v", err)
+	} else {
+		deleted := 0
+		for i := 0; i < 200; i++ {
+			handle, _, _ := procWintunOpen.Call(uintptr(unsafe.Pointer(namePtr)))
+			if handle == 0 {
+				break
+			}
+			procWintunDelete.Call(handle)
+			procWintunClose.Call(handle)
+			deleted++
+		}
+		if deleted > 0 {
+			log.Printf("[WG] Удалено %d TUN-адаптер(ов) %s через wintun API", deleted, name)
+		}
+	}
+}
 
 // wintunEmbedded — встроенный wintun.dll (signed by WireGuard LLC, 0.14.1 amd64).
 // Извлекается в `%LOCALAPPDATA%\wdtt\wintun.dll` при первом старте, чтобы
@@ -70,10 +130,13 @@ func base64ToHex(b64 string) (string, error) {
 
 // teardownWindowsWireGuard убирает всё, что наставил SetupWindowsWireGuard:
 // исключающие маршруты, default route, IP-адрес, локальный DNS-прокси
-// и TUN-устройство. Безопасна к повторному вызову (через sync.Once).
+// и TUN-устройство. Безопасна к повторному вызову и конкурентному вызову.
+// Используем mutex + nil-guarded function вместо sync.Once, потому что
+// sync.Once нельзя безопасно реинициализировать (Do после повторного
+// присвоения переменной — data race по спецификации Go).
 var (
-	wgTeardownOnce sync.Once
-	wgTeardownFn   func()
+	wgTeardownMu sync.Mutex
+	wgTeardownFn func()
 )
 
 // globalDNSProxy и originalDNSByIf управляют локальным DNS-прокси на
@@ -81,12 +144,13 @@ var (
 // подменяем на 127.0.0.1, чтобы все приложения ходили через наш прокси
 // (а не через локальный DNS провайдера, который может перехватывать/резать).
 var (
-	dnsProxyMu      sync.Mutex
-	globalDNSProxy  *dnsProxy
-	originalDNSByIf = make(map[string][]string)
+	dnsProxyMu          sync.Mutex
+	globalDNSProxy      *dnsProxy
+	originalDNSByIf     = make(map[string][]string)
+	activeDomainExcluder *domainExcluder // гибридный excluder для доменных исключений
 )
 
-func SetupWindowsWireGuard(rawConf, ifaceName string, customDNS []string) error {
+func SetupWindowsWireGuard(rawConf, ifaceName string, customDNS []string, excludeDomains []string) error {
 	cfg, err := parseWireGuardConfig(rawConf)
 	if err != nil {
 		return err
@@ -100,6 +164,11 @@ func SetupWindowsWireGuard(rawConf, ifaceName string, customDNS []string) error 
 		return err
 	}
 
+	// Delete any existing wintun adapters before creating a new one.
+	cleanupWintunAdapters(ifaceName)
+	// Set a fixed GUID so CreateTUN reuses the same adapter instead of creating
+	// a new one with a random GUID each time.
+	setFixedTUNGUID(ifaceName)
 	tunDev, err := tun.CreateTUN(ifaceName, cfg.mtu)
 	if err != nil {
 		return fmt.Errorf("CreateTUN: %w", err)
@@ -200,35 +269,51 @@ func SetupWindowsWireGuard(rawConf, ifaceName string, customDNS []string) error 
 
 	// Регистрируем teardown. Делаем это ПОСЛЕ успешного Up(), чтобы при ошибке
 	// выше маршруты не остались без устройства.
-	wgTeardownOnce = sync.Once{}
+	wgTeardownMu.Lock()
 	wgTeardownFn = func() {
-		wgTeardownOnce.Do(func() {
-			log.Printf("[WG] Teardown интерфейса %s...", actualName)
-			// Сначала останавливаем DNS-прокси и возвращаем оригинальный DNS,
-			// чтобы приложения не потеряли резолв после удаления туннеля.
-			dnsProxyMu.Lock()
-			if globalDNSProxy != nil {
-				globalDNSProxy.Stop()
-				globalDNSProxy = nil
-			}
-			for iface, orig := range originalDNSByIf {
-				if err := restoreInterfaceDNS(iface, orig); err != nil {
-					log.Printf("[DNS] Не удалось восстановить DNS на %s: %v", iface, err)
-				}
-				delete(originalDNSByIf, iface)
-			}
-			dnsProxyMu.Unlock()
-			_ = hiddenCmd("ipconfig", "/flushdns").Run()
+		wgTeardownMu.Lock()
+		if wgTeardownFn == nil {
+			wgTeardownMu.Unlock()
+			return // уже отработали
+		}
+		wgTeardownFn = nil
+		wgTeardownMu.Unlock()
 
-			wgDev.Close()
-			// Сначала убираем exclude-маршруты, чтобы вернуть трафик в норму,
-			// даже если удаление TUN/default route по какой-то причине отвалится.
-			removeExcludeRoutes()
-			_ = runNetsh("interface", "ipv4", "delete", "route", "0.0.0.0/0", actualName, "0.0.0.0", "store=active")
-			_ = runNetsh("interface", "ipv4", "delete", "address", fmt.Sprintf("name=%s", actualName), fmt.Sprintf("address=%s", cfg.address), "store=active")
-			log.Printf("[WG] Teardown завершён")
-		})
+		log.Printf("[WG] Teardown интерфейса %s...", actualName)
+		// Сначала останавливаем DNS-прокси и возвращаем оригинальный DNS,
+		// чтобы приложения не потеряли резолв после удаления туннеля.
+		dnsProxyMu.Lock()
+		if globalDNSProxy != nil {
+			globalDNSProxy.Stop()
+			globalDNSProxy = nil
+		}
+		for iface, orig := range originalDNSByIf {
+			if err := restoreInterfaceDNS(iface, orig); err != nil {
+				log.Printf("[DNS] Не удалось восстановить DNS на %s: %v", iface, err)
+			}
+			delete(originalDNSByIf, iface)
+		}
+		dnsProxyMu.Unlock()
+		_ = hiddenCmd("ipconfig", "/flushdns").Run()
+
+		// Останавливаем domain excluder (удаляет все /32 маршруты).
+		if activeDomainExcluder != nil {
+			activeDomainExcluder.Stop()
+			dnsProxyMu.Lock()
+			activeDomainExcluder = nil
+			dnsProxyMu.Unlock()
+		}
+
+		wgDev.Close()
+		cleanupWintunAdapters(actualName)
+		// Сначала убираем exclude-маршруты, чтобы вернуть трафик в норму,
+		// даже если удаление TUN/default route по какой-то причине отвалится.
+		removeExcludeRoutes()
+		_ = runNetsh("interface", "ipv4", "delete", "route", "0.0.0.0/0", actualName, "0.0.0.0", "store=active")
+		_ = runNetsh("interface", "ipv4", "delete", "address", fmt.Sprintf("name=%s", actualName), fmt.Sprintf("address=%s", cfg.address), "store=active")
+		log.Printf("[WG] Teardown завершён")
 	}
+	wgTeardownMu.Unlock()
 
 	// Если задан customDNS — поднимаем локальный DNS-прокси на 127.0.0.1:53
 	// и подменяем системный DNS на 127.0.0.1. Так приложения резолвят через
@@ -255,6 +340,27 @@ func SetupWindowsWireGuard(rawConf, ifaceName string, customDNS []string) error 
 			dnsProxyMu.Lock()
 			globalDNSProxy = proxy
 			dnsProxyMu.Unlock()
+
+			// Инициализируем domain excluder (IP-уровень исключений).
+			// Резолвит исключённые домены через те же DNS-серверы, что и прокси
+			// (8.8.8.8, 1.1.1.1 через туннель), и добавляет /32 маршруты через
+			// оригинальный шлюз. Это работает независимо от того, какой DNS
+			// использует приложение — сетевой уровень всегда выберет /32.
+			if len(excludeDomains) > 0 && origGateway != "" && len(customDNS) > 0 {
+				excluder := newDomainExcluder(excludeDomains, origGateway, origIface, customDNS, srcIP)
+				excluder.Start()
+				// Хук в DNS-прокси: для wildcard-паттернов excluder резолвит
+				// поддомены on-demand при DNS-запросе и возвращает IP для ответа.
+				proxy.SetExcludedDomainHandler(func(hostname string) []net.IP {
+					return excluder.HandleExcludedDNS(hostname)
+				})
+				dnsProxyMu.Lock()
+				activeDomainExcluder = excluder
+				dnsProxyMu.Unlock()
+			} else if len(excludeDomains) > 0 {
+				log.Printf("[DOMEXCL] Доменные исключения не активированы (gateway=%q, dns=%v)", origGateway, customDNS)
+			}
+
 			if origIface != "" {
 				orig := getInterfaceDNS(origIface)
 				originalDNSByIf[origIface] = orig
@@ -280,8 +386,11 @@ func SetupWindowsWireGuard(rawConf, ifaceName string, customDNS []string) error 
 // TeardownWindowsWireGuard убирает WireGuard-интерфейс и все маршруты.
 // Безопасно вызывать многократно и из любого места (включая defer).
 func TeardownWindowsWireGuard() {
-	if wgTeardownFn != nil {
-		wgTeardownFn()
+	wgTeardownMu.Lock()
+	fn := wgTeardownFn
+	wgTeardownMu.Unlock()
+	if fn != nil {
+		fn()
 	}
 }
 
@@ -536,12 +645,29 @@ func addHostRoute(iface, gateway, targetIP string) error {
 }
 
 func runNetsh(args ...string) error {
-	cmd := hiddenCmd("netsh", args...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("netsh %v failed: %w; output=%s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+	// Retry при ERROR_NOT_FOUND (0x00000490): после tun.CreateTUN() Windows
+	// регистрирует адаптер в своём стеке с задержкой ~100-500мс, и netsh,
+	// вызванный сразу после Up(), может не найти адаптер по имени.
+	const maxAttempts = 5
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		cmd := hiddenCmd("netsh", args...)
+		output, err := cmd.CombinedOutput()
+		if err == nil {
+			return nil
+		}
+		lastErr = fmt.Errorf("netsh %v failed: %w; output=%s",
+			strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+		// Ретраим только если адаптер ещё не зарегистрирован.
+		// Другие ошибки (access denied, invalid args) ретраить бессмысленно.
+		if !strings.Contains(string(output), "0x00000490") {
+			return lastErr
+		}
+		if attempt < maxAttempts-1 {
+			time.Sleep(200 * time.Millisecond)
+		}
 	}
-	return nil
+	return lastErr
 }
 
 // runRouteAdd добавляет статический маршрут через указанный шлюз.

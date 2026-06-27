@@ -75,7 +75,16 @@ export default function Settings() {
 
   useEffect(() => {
     GetAutoStart().then(v => {
-      if (v !== settings.autoStart) update('autoStart', v);
+      // Читаем актуальное значение из store, а не из closure settings,
+      // чтобы избежать stale closure при повторном монтировании компонента.
+      const current = settingsStore.get().autoStart;
+      if (v !== current) {
+        setSettings(s => {
+          const next = { ...s, autoStart: v };
+          settingsStore.save(next);
+          return next;
+        });
+      }
     }).catch(() => {});
   }, []);
 

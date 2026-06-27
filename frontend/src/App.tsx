@@ -6,6 +6,7 @@ import Deploy from './pages/Deploy';
 import Logs from './pages/Logs';
 import Info from './pages/Info';
 import SettingsPage from './pages/Settings';
+import Exclusions from './pages/Exclusions';
 import Toast from './components/Toast';
 import CloseDialog from './modals/CloseDialog';
 import { wdttLinkStore, parseWdttUrl } from './lib/utils/wdttLink';
@@ -97,6 +98,7 @@ export default function App() {
           <Route path="/logs" element={<Logs />} />
           <Route path="/info" element={<Info />} />
           <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/exclusions" element={<Exclusions />} />
         </Route>
       </Routes>
       <Toast />

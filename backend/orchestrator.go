@@ -159,6 +159,9 @@ type ConnectParams struct {
 	DNSUpstream []string `json:"dnsUpstream,omitempty"`
 	NoDNSProxy  bool     `json:"noDNSProxy,omitempty"`
 	WGInterface string   `json:"wgInterface,omitempty"`
+
+	// ExcludeDomains — паттерны доменов для исключения из туннеля (wildcards поддерживаются).
+	ExcludeDomains []string `json:"excludeDomains,omitempty"`
 }
 
 func loadProfile(name string) (*ProfileData, error) {
@@ -282,10 +285,11 @@ func (o *Orchestrator) launch(p ConnectParams) (*coreSession, error) {
 		WGConfigMTU: p.MTU,
 
 		// Наши уникальные фичи
-		AutoWG:      autoWG,
-		DNSUpstream: dnsUpstream,
-		NoDNSProxy:  noDNS,
-		WGInterface: wgIfaceName,
+		AutoWG:         autoWG,
+		DNSUpstream:    dnsUpstream,
+		NoDNSProxy:     noDNS,
+		WGInterface:    wgIfaceName,
+		ExcludeDomains: p.ExcludeDomains,
 	}
 
 	c := core.New(cfg)

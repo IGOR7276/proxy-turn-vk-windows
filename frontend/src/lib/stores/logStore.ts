@@ -34,9 +34,6 @@ function assignKey(message: string, level: LogLevel): { key?: string; priority?:
   if (message.includes('[WG] Конфиг применён') || message.includes('туннель активен')) {
     return { key: 'ready', priority: 1 };
   }
-  if ((message.includes('[WG]') || message.includes('WireGuard')) && !message.includes('Конфиг')) {
-    return { key: '__wg__', priority: 2 };
-  }
   if (message.includes('[VK Auth]') && (message.includes('токен') || message.includes('получен') || message.includes('OAuth') || message.includes('креды') || message.includes('TURN'))) {
     return { key: 'creds_ok', priority: 2 };
   }
@@ -90,13 +87,6 @@ export const logStore = {
       }
       entries = [...entries, { id: seq++, level, message, time, count: 1, key, priority }];
       if (entries.length > MAX_ENTRIES) entries = entries.slice(-MAX_ENTRIES);
-      notify();
-      return;
-    }
-
-    const last = entries[entries.length - 1];
-    if (last && !last.key && last.message === message && last.level === level) {
-      entries = [...entries.slice(0, -1), { ...last, count: last.count + 1 }];
       notify();
       return;
     }

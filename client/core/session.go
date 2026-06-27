@@ -329,8 +329,8 @@ func RunSession(
 	if err != nil {
 		if useWrap {
 			errStr := strings.ToLower(err.Error())
-		if strings.Contains(errStr, "deadline") || strings.Contains(errStr, "timeout") {
-			log.Printf("[ВОРКЕР #%d] [DTLS] Таймаут хендшейка (15s) с WRAP, пароль/WRAP не подтверждён", sessionID)
+			if strings.Contains(errStr, "deadline") || strings.Contains(errStr, "timeout") {
+				log.Printf("[ВОРКЕР #%d] [DTLS] Таймаут хендшейка (15s) с WRAP, пароль/WRAP не подтверждён", sessionID)
 				return false, fmt.Errorf("WRAP_AUTH_TIMEOUT: DTLS timeout, пароль/WRAP не подтверждён")
 			}
 		}

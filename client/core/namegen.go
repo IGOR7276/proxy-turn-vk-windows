@@ -63,7 +63,7 @@ func generateName() string {
 		fn = maleFirstNames[rand.Intn(len(maleFirstNames))]
 	}
 	// 70% chance to have a last name
-	if rand.Float32() < 0.3 {
+	if rand.Float32() >= 0.7 {
 		return fn
 	}
 	ln := lastNames[rand.Intn(len(lastNames))]

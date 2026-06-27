@@ -67,7 +67,11 @@ func (a *App) VkCallJoin(hash string) error {
 	oauthMu.Unlock()
 	if ch != nil {
 		vkLogf("Sending hash to login window...")
-		ch <- hash
+		select {
+		case ch <- hash:
+		default:
+			vkLogf("callJoinReqCh full or no receiver, dropping hash")
+		}
 	} else {
 		vkLogf("callJoinReqCh is nil, login window not running")
 	}
@@ -225,11 +229,19 @@ func (a *App) runVkLoginWindow() {
 	}()
 
 	vkLogf("Creating edge.Chromium...")
-	chrome := edge.NewChromium()
+	var chrome *edge.Chromium
+	chrome = edge.NewChromium()
 	chrome.SetErrorCallback(func(err error) {
 		vkLogf("Chromium error: %v", err)
 	})
 	*(*uintptr)(unsafe.Pointer(chrome)) = uintptr(hwnd)
+	// Cleanup chrome BEFORE DestroyWindow to prevent envHandler or message
+	// callbacks from using a destroyed HWND or stale COM references.
+	defer func() {
+		*(*uintptr)(unsafe.Pointer(chrome)) = 0
+		chrome.MessageCallback = nil
+		chrome.SetErrorCallback(nil)
+	}()
 
 	webviewloader.CreateCoreWebView2EnvironmentWithOptions(&envHandler{
 		chrome: chrome,
@@ -283,6 +295,11 @@ func (a *App) runVkLoginWindow() {
 
 	chrome.MessageCallback = func(message string, sender *edge.ICoreWebView2, args *edge.ICoreWebView2WebMessageReceivedEventArgs) {
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					vkLogf("PANIC in MessageCallback: %v", r)
+				}
+			}()
 			var pd struct {
 				Turndata string `json:"turndata"`
 			}
@@ -308,7 +325,11 @@ func (a *App) runVkLoginWindow() {
 			vkAuth.mu.Unlock()
 			out := fmt.Sprintf("%s|%s", hash, finalB64)
 			if ch := turnCredsCh; ch != nil {
-				ch <- out
+				select {
+				case ch <- out:
+				default:
+					vkLogf("turnCredsCh full or no receiver, dropping TURN creds")
+				}
 			}
 		}()
 	}
@@ -427,7 +448,7 @@ func oauthWndProc(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintptr {
 			close(oauthDone)
 		}
 		oauthMu.Unlock()
-		return 0
+		return win.DefWindowProc(hwnd, msg, wParam, lParam)
 	case win.WM_DESTROY:
 		win.PostQuitMessage(0)
 		return 0
@@ -446,7 +467,10 @@ type envHandler struct {
 func (h *envHandler) EnvironmentCompleted(errorCode webviewloader.HRESULT, createdEnvironment *webviewloader.ICoreWebView2Environment) webviewloader.HRESULT {
 	if errorCode != 0 || createdEnvironment == nil {
 		vkLogf("Environment error: hr=%d", errorCode)
-		h.token <- tokenDetail{}
+		select {
+		case h.token <- tokenDetail{}:
+		default:
+		}
 		return webviewloader.HRESULT(windows.S_OK)
 	}
 

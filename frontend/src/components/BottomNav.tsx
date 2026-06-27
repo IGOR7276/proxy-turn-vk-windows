@@ -8,6 +8,7 @@ import {
   IconInfoCircle,
   IconSun,
   IconMoon,
+  IconBan,
 } from '@tabler/icons-react';
 import { themeStore } from '../lib/stores/themeStore';
 
@@ -15,6 +16,7 @@ const TABS = [
   { path: '/', icon: IconPlugConnected, label: 'Туннель' },
   { path: '/deploy', icon: IconServer2, label: 'Деплой' },
   { path: '/logs', icon: IconTerminal2, label: 'Логи' },
+  { path: '/exclusions', icon: IconBan, label: 'Исключения' },
   { path: '/settings', icon: IconSettings2, label: 'Настройки' },
   { path: '/info', icon: IconInfoCircle, label: 'Инфо' },
 ];

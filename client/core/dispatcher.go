@@ -63,11 +63,15 @@ type Dispatcher struct {
 	mu         sync.Mutex // Используется только для записи
 	rrIndex    int
 	rrCount    int
-	ReturnCh   chan []byte
-	ctx        context.Context
-	cancel     context.CancelFunc
-	wg         sync.WaitGroup
-	stats      *Stats
+	// droppedPackets — счётчик пакетов, дропнутых при переполнении всех workers.
+	// lastDropLog — unixnano последнего лога о дропах (для троттлинга, не чаще раза в 10с).
+	droppedPackets int64
+	lastDropLog    int64
+	ReturnCh       chan []byte
+	ctx            context.Context
+	cancel         context.CancelFunc
+	wg             sync.WaitGroup
+	stats          *Stats
 }
 
 func NewDispatcher(ctx context.Context, localConn net.PacketConn, stats *Stats) *Dispatcher {
@@ -195,10 +199,18 @@ func (d *Dispatcher) readLoop() {
 		}
 
 		if !sent {
-			// Все workers перегружены — сдвигаем указатель, пакет дропается
+			// Все workers перегружены — сдвигаем указатель, пакет дропается.
+			// Инкрементируем счётчик дропов и логируем троттлированно (не чаще раза в 10с),
+			// чтобы избежать спама при перегрузке.
 			d.rrIndex = (idx + 1) % nw
 			d.rrCount = 0
 			putPktBuf(pkt)
+			dropped := atomic.AddInt64(&d.droppedPackets, 1)
+			now := time.Now().UnixNano()
+			last := atomic.LoadInt64(&d.lastDropLog)
+			if now-last > int64(10*time.Second) && atomic.CompareAndSwapInt64(&d.lastDropLog, last, now) {
+				log.Printf("[ДИСП] Все %d workers перегружены, дропнуто пакетов: %d (всего)", nw, dropped)
+			}
 		}
 	}
 }

@@ -242,8 +242,8 @@ func WorkerGroup(
 						errStr += " (ошибка со стороны ВК)"
 					}
 
-					if strings.Contains(errStr, "хеш мёртв") ||
-						strings.Contains(errStr, "FATAL_AUTH") {
+					if strings.Contains(errStrLower, "хеш мёртв") ||
+						strings.Contains(errStrLower, "fatal_auth") {
 						log.Printf("[ВОРКЕР #%d] Фатальная ошибка: %s", wid, errStr)
 						return
 					}
