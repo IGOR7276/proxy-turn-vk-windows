@@ -14,6 +14,9 @@ export interface Server {
 
 export type DnsProvider = 'google' | 'cloudflare' | 'yandex' | 'custom';
 export type CloseAction = 'ask' | 'hide' | 'exit';
+export type Fingerprint = 'chrome' | 'safari' | 'ios' | 'android' | 'firefox';
+
+export const FINGERPRINT_OPTIONS: Fingerprint[] = ['chrome', 'safari', 'ios', 'android', 'firefox'];
 
 export interface AppSettings {
   bypassMode: 'РУЧ' | 'АВТ';
@@ -23,6 +26,7 @@ export interface AppSettings {
   autoStart: boolean;
   hashes: [string, string, string, string];
   linkMode: boolean;            // автоматически обрабатывать wdtt:// ссылки из буфера (default true)
+  fingerprint: Fingerprint;     // глобальный fingerprint для всех серверов
 
   // DNS: выбор пары upstream-ов
   dnsProxyEnabled: boolean;     // включить локальный DNS-прокси (default true)
@@ -66,6 +70,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   autoStart: true,
   hashes: ['', '', '', ''],
   linkMode: true,
+  fingerprint: 'chrome',
   dnsProxyEnabled: true,
   dnsProvider: 'yandex',
   dnsCustom: '8.8.8.8,1.1.1.1',

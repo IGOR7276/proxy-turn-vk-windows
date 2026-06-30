@@ -157,6 +157,9 @@ func (c *Core) Start(ctx context.Context) (<-chan Event, error) {
 	c.ctx, c.cancel = context.WithCancel(ctx)
 	ctx = c.ctx
 
+	// Регистрируем глобальный эмиттер для captcha_required и т.п.
+	EmitEvent = c.emit
+
 	peer, err := net.ResolveUDPAddr("udp", c.cfg.PeerAddr)
 	if err != nil {
 		c.cancel()
@@ -421,6 +424,8 @@ func (c *Core) Stop() {
 		if c.cancel != nil {
 			c.cancel()
 		}
+		EmitEvent = nil
+		WebViewCaptchaHandler = nil
 	})
 }
 

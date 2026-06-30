@@ -151,6 +151,7 @@ type ConnectParams struct {
 	CaptchaMode string   `json:"captchaMode"`
 	VkAuthMode  string   `json:"vkAuthMode,omitempty"`
 	Workers     int      `json:"workers,omitempty"`
+	Fingerprint string   `json:"fingerprint,omitempty"`
 	MTU         int      `json:"mtu,omitempty"`
 	Hashes      []string `json:"hashes,omitempty"`
 
@@ -269,6 +270,12 @@ func (o *Orchestrator) launch(p ConnectParams) (*coreSession, error) {
 		}
 	}
 
+	// Fingerprint: глобальный из настроек, если не передан — из профиля
+	fingerprint := p.Fingerprint
+	if fingerprint == "" {
+		fingerprint = prof.Fingerprint
+	}
+
 	cfg := core.Config{
 		PeerAddr:    prof.PeerAddr,
 		Password:    prof.Password,
@@ -277,7 +284,7 @@ func (o *Orchestrator) launch(p ConnectParams) (*coreSession, error) {
 		TurnHost:    prof.TurnHost,
 		TurnPort:    prof.TurnPort,
 		DeviceID:    prof.DeviceID,
-		Fingerprint: prof.Fingerprint,
+		Fingerprint: fingerprint,
 		ClientIDs:   prof.ClientIDs,
 		Workers:     workers,
 		CaptchaMode: p.CaptchaMode,
@@ -291,6 +298,9 @@ func (o *Orchestrator) launch(p ConnectParams) (*coreSession, error) {
 		WGInterface:    wgIfaceName,
 		ExcludeDomains: p.ExcludeDomains,
 	}
+
+	// Регистрируем WebView2-решатель капчи для Windows
+	core.WebViewCaptchaHandler = SolveCaptchaWebView
 
 	c := core.New(cfg)
 	events, err := c.Start(o.appCtx)
@@ -416,8 +426,20 @@ func (o *Orchestrator) Stop() {
 	}
 	sess.c.Stop()
 	if sess.done != nil {
-		<-sess.done
+		select {
+		case <-sess.done:
+		case <-time.After(8 * time.Second):
+			log.Printf("[ORCH] Stop timeout: teardown is still running in background")
+		}
 	}
+	// Force-clear session even if teardown hasn't completed,
+	// so the next Start() doesn't get "already running".
+	o.mu.Lock()
+	if o.sess == sess {
+		o.sess = nil
+	}
+	o.mu.Unlock()
+	core.TeardownWindowsWireGuard()
 }
 
 // SendCaptchaResult передаёт токен капчи в ядро.

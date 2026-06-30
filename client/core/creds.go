@@ -545,6 +545,10 @@ func solveCaptchaBySelectedMode(
 		if ctx.Err() != nil {
 			return "", solveErr
 		}
+		if isCaptchaSessionExhausted(solveErr) {
+			log.Printf("[STREAM %d] [КАПЧА] RJS: сессия исчерпана, перехожу на ручной WBV", streamID)
+			return requestWebViewCaptcha(streamID, captchaErr, "manual", captchaManualWebViewTimeout)
+		}
 		log.Printf("[STREAM %d] [КАПЧА] RJS: ошибка, fallback на WBV Auto: %v", streamID, solveErr)
 		return requestWebViewCaptcha(streamID, captchaErr, "auto", captchaAutoWebViewTimeout)
 	}
@@ -561,6 +565,15 @@ func solveCaptchaBySelectedMode(
 	}
 	lastErr := solveErr
 	log.Printf("[STREAM %d] [КАПЧА] AUTO: Go v2 не решил за 2 попытки: %v", streamID, solveErr)
+
+	if isCaptchaSessionExhausted(solveErr) {
+		log.Printf("[STREAM %d] [КАПЧА] AUTO: сессия исчерпана, перехожу на ручной WBV", streamID)
+		token, solveErr = requestWebViewCaptcha(streamID, captchaErr, "manual", captchaManualWebViewTimeout)
+		if solveErr == nil {
+			return token, nil
+		}
+		return "", fmt.Errorf("automatic captcha chain failed: %w; manual fallback failed: %v", lastErr, solveErr)
+	}
 
 	for wbvAttempt := 1; wbvAttempt <= 2; wbvAttempt++ {
 		log.Printf("[STREAM %d] [КАПЧА] AUTO: WBV Auto попытка %d/2 (timeout %s)", streamID, wbvAttempt, captchaAutoWebViewTimeout)
@@ -625,7 +638,43 @@ func requestWebViewCaptcha(streamID int, captchaErr *VkCaptchaError, mode string
 	}
 
 	drainCaptchaResult()
+
+	// Если зарегистрирован хендлер (Wails режим), вызываем его синхронно
+	if WebViewCaptchaHandler != nil {
+		waitCtx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		type handlerResult struct {
+			token string
+			err   error
+		}
+		resultCh := make(chan handlerResult, 1)
+		go func() {
+			token, err := WebViewCaptchaHandler(mode, captchaErr.RedirectURI, captchaErr.SessionToken)
+			resultCh <- handlerResult{token, err}
+		}()
+		select {
+		case r := <-resultCh:
+			if r.err != nil {
+				return "", r.err
+			}
+			log.Printf("[STREAM %d] [КАПЧА] WBV: %s solve succeeded (handler)", streamID, mode)
+			return r.token, nil
+		case <-waitCtx.Done():
+			return "", fmt.Errorf("webview captcha timed out (handler)")
+		}
+	}
+
+	// CLI/Android путь: печатаем в stdout и ждём на канале
 	fmt.Printf("CAPTCHA_SOLVE|%s|%s|%s\n", mode, captchaErr.RedirectURI, captchaErr.SessionToken)
+
+	// Emit captcha_required для внешнего решателя (frontend/Android)
+	if EmitEvent != nil {
+		EmitEvent(Event{
+			Type: EventEvent,
+			Name: "captcha_required",
+			Data: fmt.Sprintf("%s|%s|%s", mode, captchaErr.RedirectURI, captchaErr.SessionToken),
+		})
+	}
 
 	waitCtx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()

@@ -87,11 +87,11 @@ export default function Tunnel() {
       const name = consumed.name;
       const finish = async (saveHashes: boolean) => {
         const clean = consumed.hashes.map(stripVkUrl).filter(Boolean);
+        const existing = serverStore.getAll().find(s => s.host === host);
         await SaveProfile(name, {
           peer: host, password: consumed.password, hashes: saveHashes ? clean : [],
           turn: '', port: '', device_id: '', listen: '',
         });
-        const existing = serverStore.getAll().find(s => s.host === host);
         const s = existing ?? serverStore.add({
           name, host, password: consumed.password,
           hashes: saveHashes ? (clean.slice(0, 4) as [string, string, string, string]) : ['', '', '', ''],
@@ -180,6 +180,7 @@ export default function Tunnel() {
         captchaMode: 'auto',
         vkAuthMode: vkAuthMode,
         workers: cur.power || 9,
+        fingerprint: s.fingerprint,
         mtu: s.mtu || 1280,
         hashes: filled,
         autoWG: s.autoWG,
@@ -266,11 +267,11 @@ export default function Tunnel() {
     const host = `${link.ip}:${link.dtlsPort}`;
     const name = link.name;
     const clean = link.hashes.map(stripVkUrl).filter(Boolean);
+    const existing = serverStore.getAll().find(s => s.host === host);
     await SaveProfile(name, {
       peer: host, password: link.password, hashes: clean,
       turn: '', port: '', device_id: '', listen: '',
     });
-    const existing = serverStore.getAll().find(s => s.host === host);
     const s = existing ?? serverStore.add({
       name, host, password: link.password,
       hashes: (clean.slice(0, 4) as [string, string, string, string]).length > 0

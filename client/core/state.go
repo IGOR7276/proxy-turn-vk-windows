@@ -42,6 +42,15 @@ func getCaptchaMode() string {
 	return mode
 }
 
+// WebViewCaptchaHandler вызывается когда нужна WebView-капча.
+// Если nil, используется стандартный stdout+CaptchaResultChan путь (CLI/Android).
+// Хендлер должен вернуть success_token или ошибку.
+var WebViewCaptchaHandler func(mode, redirectURI, sessionToken string) (string, error)
+
+// EmitEvent — глобальный эмиттер событий, используется для captcha_required и т.п.
+// Устанавливается ядром при старте.
+var EmitEvent func(Event)
+
 // drainCaptchaResult — выкидывает устаревший токен из канала, если там что-то есть.
 func drainCaptchaResult() {
 	select {

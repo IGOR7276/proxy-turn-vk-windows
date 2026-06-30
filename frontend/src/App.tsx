@@ -9,6 +9,7 @@ import SettingsPage from './pages/Settings';
 import Exclusions from './pages/Exclusions';
 import Toast from './components/Toast';
 import CloseDialog from './modals/CloseDialog';
+import CaptchaSolve from './modals/CaptchaSolve';
 import { wdttLinkStore, parseWdttUrl } from './lib/utils/wdttLink';
 import { toastStore } from './lib/stores/toastStore';
 import { logStore } from './lib/stores/logStore';
@@ -58,6 +59,16 @@ function useWailsEvents() {
         logStore.push('WARN', `Требуется вход через VK для хеша: ${String(hash ?? '')}`);
         window.dispatchEvent(new CustomEvent('vk_auth_required', { detail: String(hash ?? '') }));
       }),
+      EventsOn('captcha_required', (data: unknown) => {
+        const str = String(data ?? '');
+        logStore.push('WARN', 'Требуется решение капчи');
+        // Извлекаем redirectURI из data (формат: mode|redirectURI|sessionToken)
+        const parts = str.split('|');
+        if (parts.length >= 2) {
+          window.open(parts[1], '_blank');
+        }
+        window.dispatchEvent(new CustomEvent('captcha_required', { detail: str }));
+      }),
     ];
     return () => offs.forEach(off => off());
   }, []);
@@ -67,6 +78,7 @@ export default function App() {
   useWailsEvents();
   useWdttPaste();
   const [closeDialog, setCloseDialog] = useState(false);
+  const [showCaptcha, setShowCaptcha] = useState(false);
 
   useEffect(() => {
     const s = settingsStore.get();
@@ -75,8 +87,9 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const off = EventsOn('show_close_dialog', () => setCloseDialog(true));
-    return () => off();
+    const off1 = EventsOn('show_close_dialog', () => setCloseDialog(true));
+    const off2 = EventsOn('captcha_required', () => setShowCaptcha(true));
+    return () => { off1(); off2(); };
   }, []);
 
   const handleCloseChoice = (action: 'hide' | 'exit', remember: boolean) => {
@@ -107,6 +120,9 @@ export default function App() {
           onClose={() => setCloseDialog(false)}
           onChoose={handleCloseChoice}
         />
+      )}
+      {showCaptcha && (
+        <CaptchaSolve onClose={() => setShowCaptcha(false)} />
       )}
     </BrowserRouter>
   );

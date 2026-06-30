@@ -78,9 +78,6 @@ function miniEntry(entry: LogEntry): LogEntry {
   return { ...entry, message: `[${cleaned}]` };
 }
 
-let seqIdCounter = 1000000;
-function seqId() { return seqIdCounter++; }
-
 export default function Logs() {
   const [filter, setFilter] = useState<Filter>('MINI');
   const [search, setSearch] = useState('');
@@ -101,9 +98,24 @@ export default function Logs() {
     autoScroll.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
   }, []);
 
-  const miniEntries = entries
-    .filter(e => (e.priority ?? 99) < 10 && e.key)
-    .map(miniEntry);
+  const miniEntries = (() => {
+    const map = new Map<string, LogEntry & { lastIdx: number }>();
+    entries
+      .filter(e => (e.priority ?? 99) < 10 && e.key)
+      .map(miniEntry)
+      .forEach((e, idx) => {
+        const existing = map.get(e.key!);
+        if (existing) {
+          existing.count += 1;
+          existing.message = e.message;
+          existing.time = e.time;
+          existing.lastIdx = idx;
+        } else {
+          map.set(e.key!, { ...e, count: 1, lastIdx: idx });
+        }
+      });
+    return [...map.values()].sort((a, b) => a.lastIdx - b.lastIdx);
+  })();
 
   const visible = (filter === 'MINI' ? miniEntries : entries).filter(e => {
     if (filter !== 'ALL' && filter !== 'MINI' && e.level !== filter) return false;
@@ -202,12 +214,7 @@ export default function Logs() {
             </div>
           ) : (
             <div className="lg-list" ref={listRef} onScroll={onScroll}>
-              {visible.flatMap(e => {
-                if (e.count <= 1) return [e];
-                const expanded: LogEntry[] = [];
-                for (let i = 0; i < e.count; i++) expanded.push({ ...e, id: seqId() });
-                return expanded;
-              }).map(e => (
+              {visible.map(e => (
                 <div key={e.id} className="lg-row">
                   <span className="lg-time">{e.time}</span>
                   <span className="lg-level" style={{ color: LEVEL_COLOR[e.level] }}>{e.level}</span>

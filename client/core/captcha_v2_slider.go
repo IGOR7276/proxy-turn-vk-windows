@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 type sliderPuzzleV2 struct {
@@ -67,6 +68,9 @@ func (s *captchaV2Session) solveSliderCaptcha(
 	}
 
 	limit := puzzle.Attempts
+	if limit > captchaV2MaxSliderChecks {
+		limit = captchaV2MaxSliderChecks
+	}
 	if limit > len(guesses) {
 		limit = len(guesses)
 	}
@@ -75,10 +79,7 @@ func (s *captchaV2Session) solveSliderCaptcha(
 	}
 	log.Printf("[КАПЧА] v2 slider guesses ranked: total=%d limit=%d", len(guesses), limit)
 
-	deviceJSON := captchaV2DeviceInfo
-	if s.savedProfile != nil && strings.TrimSpace(s.savedProfile.DeviceJSON) != "" {
-		deviceJSON = s.savedProfile.DeviceJSON
-	}
+	deviceJSON := captchaV2DeviceJSON(s.savedProfile)
 	if _, err := s.captchaRequest("captchaNotRobot.componentDone", [][2]string{
 		{"session_token", sessionToken},
 		{"domain", "vk.com"},
@@ -119,6 +120,13 @@ func (s *captchaV2Session) solveSliderCaptcha(
 		if strings.EqualFold(check.Status, "error_limit") {
 			return "", errCaptchaV2RateLimit
 		}
+		if i+1 < limit {
+			select {
+			case <-s.ctx.Done():
+				return "", s.ctx.Err()
+			case <-time.After(time.Duration(350+mathrand.Intn(300)) * time.Millisecond):
+			}
+		}
 	}
 	return "", errors.New("slider guesses exhausted")
 }
@@ -130,6 +138,9 @@ func parseSliderPuzzleV2(raw map[string]any) (*sliderPuzzleV2, error) {
 	}
 	status := captchaV2StringifyAny(resp["status"])
 	if !strings.EqualFold(status, "ok") {
+		if strings.EqualFold(status, "error") || strings.EqualFold(status, "error_limit") {
+			return nil, errCaptchaV2RateLimit
+		}
 		return nil, fmt.Errorf("slider getContent status: %s", status)
 	}
 	rawImage := captchaV2StringifyAny(resp["image"])

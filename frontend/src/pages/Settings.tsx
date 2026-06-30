@@ -5,7 +5,7 @@ import { tunnelStore } from '../lib/stores/tunnelStore';
 import { themeStore } from '../lib/stores/themeStore';
 import { toastStore } from '../lib/stores/toastStore';
 import type { AppSettings } from '../lib/types';
-import { DNS_PRESETS } from '../lib/types';
+import { DNS_PRESETS, FINGERPRINT_OPTIONS } from '../lib/types';
 import { SetTrayEnabled, SetAutoStart, GetAutoStart, SetCloseActionPreference, SetVkAuthMode, GetVkAuthMode } from '../../wailsjs/go/backend/App';
 
 function extractHashInput(raw: string): string {
@@ -157,6 +157,25 @@ export default function Settings() {
                 className={`sp-seg-btn${settings.bypassMode === 'РУЧ' ? ' sp-seg-btn--active' : ''}`}
                 onClick={() => update('bypassMode', 'РУЧ')}
               >РУЧ</button>
+            </div>
+          </div>
+
+          <div className="sp-row">
+            <span className="sp-label">
+              <span className="sp-label-main">
+                <IconRotate size={16} />
+                Fingerprint
+              </span>
+              <span className="sp-label-sub">chrome / safari / firefox / android / ios</span>
+            </span>
+            <div className="sp-seg">
+              {FINGERPRINT_OPTIONS.map(fp => (
+                <button
+                  key={fp}
+                  className={`sp-seg-btn${settings.fingerprint === fp ? ' sp-seg-btn--active' : ''}`}
+                  onClick={() => update('fingerprint', fp)}
+                >{fp}</button>
+              ))}
             </div>
           </div>
 

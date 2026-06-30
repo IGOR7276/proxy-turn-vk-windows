@@ -105,9 +105,25 @@ var profileList = []Profile{
 	},
 	{
 		UserAgent:       "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0",
-		SecChUa:         `"Firefox";v="132", "Not-A.Brand";v="8", "Mozilla Firefox";v="132"`,
+		SecChUa:         `"Not/A=Brand";v="8", "Firefox";v="132", "Mozilla";v="132"`,
 		SecChUaMobile:   "?0",
 		SecChUaPlatform: `"Windows"`,
+	},
+}
+
+// safariProfiles — профили Safari для macOS и iOS.
+var safariProfiles = []Profile{
+	{
+		UserAgent:       "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Safari/605.1.15",
+		SecChUa:         `"Not/A=Brand";v="99", "Safari";v="18", "Apple WebKit";v="605"`,
+		SecChUaMobile:   "?0",
+		SecChUaPlatform: `"macOS"`,
+	},
+	{
+		UserAgent:       "Mozilla/5.0 (iPhone; CPU iPhone OS 18_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Mobile/15E148 Safari/604.1",
+		SecChUa:         `"Not/A=Brand";v="99", "Safari";v="18", "Apple WebKit";v="605"`,
+		SecChUaMobile:   "?1",
+		SecChUaPlatform: `"iOS"`,
 	},
 }
 
@@ -147,7 +163,7 @@ func getRandomProfile() Profile {
 	case "ios":
 		return iosProfiles[rand.Intn(len(iosProfiles))]
 	case "safari":
-		return profileList[4] // Using macOS Chrome as approximation for Safari if no specific Safari profile exists, or implement one. Actually, let's just use iOS for safari or macos.
+		return safariProfiles[rand.Intn(len(safariProfiles))]
 	case "firefox":
 		return profileList[len(profileList)-1]
 	default:

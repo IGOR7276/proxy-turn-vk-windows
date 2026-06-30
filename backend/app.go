@@ -71,6 +71,12 @@ func (a *App) OnBeforeClose(ctx context.Context) bool {
 		runtime.WindowHide(ctx)
 		return true
 	case "exit":
+		// Останавливаем туннель в фоне, не блокируя закрытие окна
+		go func() {
+			if a.orch != nil {
+				a.orch.Stop()
+			}
+		}()
 		return false
 	default: // "ask"
 		runtime.EventsEmit(a.ctx, "show_close_dialog")
@@ -92,8 +98,9 @@ func (a *App) SetCloseAction(action string, remember bool) {
 	case "hide":
 		runtime.WindowHide(a.ctx)
 	case "exit":
+		// Запускаем остановку туннеля в фоне, не блокируя закрытие окна
 		if a.orch != nil {
-			a.orch.Stop()
+			go a.orch.Stop()
 		}
 		if !remember {
 			a.allowExit.Store(true)

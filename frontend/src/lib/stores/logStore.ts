@@ -79,12 +79,6 @@ export const logStore = {
     const { key, priority } = assignKey(message, level);
 
     if (key) {
-      const idx = entries.findIndex(e => e.key === key);
-      if (idx !== -1) {
-        entries = [...entries.slice(0, idx), { ...entries[idx], message, time, level, count: entries[idx].count + 1 }, ...entries.slice(idx + 1)];
-        notify();
-        return;
-      }
       entries = [...entries, { id: seq++, level, message, time, count: 1, key, priority }];
       if (entries.length > MAX_ENTRIES) entries = entries.slice(-MAX_ENTRIES);
       notify();
@@ -99,12 +93,6 @@ export const logStore = {
 
   pushKeyed: (level: LogLevel, message: string, key: string, priority?: number) => {
     const time = new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    const idx = entries.findIndex(e => e.key === key);
-    if (idx !== -1) {
-      entries = [...entries.slice(0, idx), { ...entries[idx], message, time, level, count: entries[idx].count + 1 }, ...entries.slice(idx + 1)];
-      notify();
-      return;
-    }
     entries = [...entries, { id: seq++, level, message, time, count: 1, key, priority }];
     if (entries.length > MAX_ENTRIES) entries = entries.slice(-MAX_ENTRIES);
     notify();
