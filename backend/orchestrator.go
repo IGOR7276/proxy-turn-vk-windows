@@ -29,6 +29,8 @@ type wailsLogWriter struct {
 
 type logEntry struct{ level, msg string }
 
+const maxLogBuf = 500
+
 func newSessionLogFile(peerIP string) *os.File {
 	dir := filepath.Join(configDir(), "logs")
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -89,6 +91,9 @@ func (w *wailsLogWriter) Write(p []byte) (int, error) {
 	}
 
 	w.mu.Lock()
+	if len(w.buf) >= maxLogBuf {
+		w.buf = w.buf[1:]
+	}
 	w.buf = append(w.buf, logEntry{level, msg})
 	w.mu.Unlock()
 	return len(p), nil
@@ -97,7 +102,8 @@ func (w *wailsLogWriter) Write(p []byte) (int, error) {
 func classifyLevel(msg string) string {
 	low := strings.ToLower(msg)
 	switch {
-	case strings.Contains(low, "ошибка") ||
+	case strings.Contains(low, "fatal_auth") ||
+		strings.Contains(low, "ошибка") ||
 		strings.Contains(low, "error") ||
 		strings.Contains(low, "fatal") ||
 		strings.Contains(low, "фатальн"):
@@ -376,8 +382,9 @@ func (o *Orchestrator) forwardEvents(sess *coreSession) {
 			runtime.EventsEmit(o.appCtx, "log", "ERROR", fmt.Sprintf("[ОШИБКА] %s", ev.Msg))
 		case core.EventEvent:
 			if ev.Name == "wg_config" {
+				runtime.EventsEmit(o.appCtx, "log", "INFO", "[WG] Применение конфига...")
 				runtime.EventsEmit(o.appCtx, "log", "INFO", "[WG] Конфиг применён, туннель активен ✓")
-				runtime.EventsEmit(o.appCtx, "state_changed", "connected", "")
+				runtime.EventsEmit(o.appCtx, "state_changed", "running", "")
 			}
 			if ev.Name == "captcha_required" {
 				runtime.EventsEmit(o.appCtx, "captcha_required", ev.Data)

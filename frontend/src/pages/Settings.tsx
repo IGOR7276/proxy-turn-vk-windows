@@ -166,7 +166,6 @@ export default function Settings() {
                 <IconRotate size={16} />
                 Fingerprint
               </span>
-              <span className="sp-label-sub">chrome / safari / firefox / android / ios</span>
             </span>
             <div className="sp-seg">
               {FINGERPRINT_OPTIONS.map(fp => (
@@ -182,7 +181,6 @@ export default function Settings() {
           <div className={`sp-row${locked ? ' sp-row-locked' : ''}`}>
             <span className="sp-label">
               <span className="sp-label-main">MTU</span>
-              <span className="sp-label-sub">576–1500 • 1280 без фрагментации, 1380 для игр, 1420 макс</span>
             </span>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-end' }}>
               <input
@@ -239,11 +237,6 @@ export default function Settings() {
           <div className={`sp-row${locked ? ' sp-row-locked' : ''}`} style={{ alignItems: 'flex-start' }}>
             <span className="sp-label" style={{ paddingTop: 6 }}>
               <span className="sp-label-main">DNS-провайдер</span>
-              <span className="sp-label-sub">
-                {settings.dnsProvider === 'custom'
-                  ? settings.dnsCustom
-                  : DNS_PRESETS[settings.dnsProvider]?.servers}
-              </span>
             </span>
             <div className="sp-seg" style={{ flexWrap: 'wrap' }}>
               {(['google', 'cloudflare', 'yandex', 'custom'] as const).map(p => (
@@ -420,7 +413,6 @@ export default function Settings() {
                 <IconX size={16} />
                 При нажатии на крестик
               </span>
-              <span className="sp-label-sub">спрашивать / скрыть в трей / закрыть</span>
             </span>
             <div className="sp-seg sp-seg--compact">
               {([

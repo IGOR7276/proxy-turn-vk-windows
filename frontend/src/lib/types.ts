@@ -72,7 +72,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   linkMode: true,
   fingerprint: 'chrome',
   dnsProxyEnabled: true,
-  dnsProvider: 'yandex',
+	dnsProvider: 'google',
   dnsCustom: '8.8.8.8,1.1.1.1',
   autoWG: true,
   wgInterface: 'WDTT',

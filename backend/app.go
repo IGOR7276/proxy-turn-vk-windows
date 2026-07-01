@@ -3,8 +3,10 @@ package backend
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +16,8 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 	"wg-turn-client/core"
 )
+
+const appVersion = "2.1.3"
 
 // App — Wails App, связующее звено между UI и Orchestrator.
 type App struct {
@@ -44,6 +48,7 @@ func (a *App) Startup(ctx context.Context) {
 	a.InitVkAuthMode()
 	a.orch = NewOrchestrator(ctx, a.onTrayUpdate)
 	a.startTrayIfNeeded()
+	go a.checkUpdateBackground()
 }
 
 // onTrayUpdate вызывается Orchestrator при обновлении статистики.
@@ -248,6 +253,56 @@ func (a *App) CheckVPN() []string {
 		}
 	}
 	return found
+}
+
+// ─── Проверка обновлений ───
+
+type UpdateInfo struct {
+	Available bool   `json:"available"`
+	Version   string `json:"version"`
+	URL       string `json:"url"`
+}
+
+func (a *App) checkUpdateBackground() {
+	// Небольшая задержка, чтобы приложение успело запуститься
+	time.Sleep(3 * time.Second)
+	info := a.CheckUpdate()
+	if info.Available {
+		runtime.EventsEmit(a.ctx, "update_available", info.Version, info.URL)
+	}
+}
+
+// CheckUpdate проверяет GitHub releases на наличие новой версии.
+func (a *App) CheckUpdate() UpdateInfo {
+	client := &http.Client{Timeout: 10 * time.Second}
+	req, err := http.NewRequest("GET", "https://api.github.com/repos/IGOR7276/proxy-turn-vk-windows/releases/latest", nil)
+	if err != nil {
+		return UpdateInfo{}
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return UpdateInfo{}
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return UpdateInfo{}
+	}
+	var release struct {
+		TagName string `json:"tag_name"`
+	}
+	if err := json.Unmarshal(body, &release); err != nil {
+		return UpdateInfo{}
+	}
+	if release.TagName == "" || release.TagName == "v"+appVersion {
+		return UpdateInfo{}
+	}
+	return UpdateInfo{
+		Available: true,
+		Version:   release.TagName,
+		URL:       "https://github.com/IGOR7276/proxy-turn-vk-windows/releases",
+	}
 }
 
 // ─── Профили ───

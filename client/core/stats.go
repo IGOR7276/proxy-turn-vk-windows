@@ -17,7 +17,7 @@ func NewStats() *Stats {
 }
 
 func (s *Stats) RunLoop(shutdown <-chan struct{}) {
-	ticker := time.NewTicker(3 * time.Second)
+	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
 	for {

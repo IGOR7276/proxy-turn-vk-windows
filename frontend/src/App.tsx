@@ -79,6 +79,7 @@ export default function App() {
   useWdttPaste();
   const [closeDialog, setCloseDialog] = useState(false);
   const [showCaptcha, setShowCaptcha] = useState(false);
+  const [updateInfo, setUpdateInfo] = useState<{ version: string; url: string } | null>(null);
 
   useEffect(() => {
     const s = settingsStore.get();
@@ -89,7 +90,10 @@ export default function App() {
   useEffect(() => {
     const off1 = EventsOn('show_close_dialog', () => setCloseDialog(true));
     const off2 = EventsOn('captcha_required', () => setShowCaptcha(true));
-    return () => { off1(); off2(); };
+    const off3 = EventsOn('update_available', (version: unknown, url: unknown) => {
+      setUpdateInfo({ version: String(version ?? ''), url: String(url ?? '') });
+    });
+    return () => { off1(); off2(); off3(); };
   }, []);
 
   const handleCloseChoice = (action: 'hide' | 'exit', remember: boolean) => {
@@ -123,6 +127,32 @@ export default function App() {
       )}
       {showCaptcha && (
         <CaptchaSolve onClose={() => setShowCaptcha(false)} />
+      )}
+      {updateInfo && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 9999,
+          background: 'rgba(0,0,0,0.5)', display: 'flex',
+          alignItems: 'center', justifyContent: 'center',
+        }} onClick={() => setUpdateInfo(null)}>
+          <div style={{
+            background: 'var(--surface)', borderRadius: 'var(--r-card)',
+            padding: 24, maxWidth: 400, width: '90%',
+            boxShadow: '0 8px 32px rgba(0,0,0,0.3)',
+            border: '1px solid var(--border)',
+          }} onClick={e => e.stopPropagation()}>
+            <h3 style={{ margin: '0 0 8px', color: 'var(--text)' }}>Доступно обновление</h3>
+            <p style={{ margin: '0 0 16px', color: 'var(--text-2)', fontSize: 14 }}>
+              Версия <strong>{updateInfo.version}</strong> готова к установке.
+            </p>
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <button className="sp-seg-btn" onClick={() => setUpdateInfo(null)}>Позже</button>
+              <button className="sp-seg-btn sp-seg-btn--active" onClick={() => {
+                window.open(updateInfo.url, '_blank');
+                setUpdateInfo(null);
+              }}>Скачать</button>
+            </div>
+          </div>
+        </div>
       )}
     </BrowserRouter>
   );

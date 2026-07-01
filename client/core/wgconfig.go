@@ -1,7 +1,7 @@
 package core
 
 import (
-	"strconv"
+	"fmt"
 	"strings"
 )
 
@@ -11,16 +11,16 @@ import (
 // Что делает:
 //   - Удаляет строку `DNS = ...` из [Interface] (мы не хотим, чтобы WG перехватывал
 //     системный DNS — это ломает локальный резолв и замедляет обращения к VK API).
-//   - Добавляет `MTU = 1280` в [Interface], если его нет (1280 — стандарт для
-//     туннелей через TURN, у которых типичный MTU ~1300-1400).
+//   - Добавляет `MTU = <mtu>` в [Interface] (1280 по умолчанию).
 //
 // Не делаем split 0.0.0.0/0 → 2× /1, как в PWDTT: in-process wireguard-go
 // нормально принимает 0.0.0.0/0 в AllowedIPs, split нужен только для
 // wireguard.exe из официального клиента.
-func patchWGConfig(raw string) string {
-	const defaultMTU = 1280
-	mtuLine := "MTU = " + strconv.Itoa(defaultMTU)
-
+func patchWGConfig(raw string, mtu int) string {
+	if mtu <= 0 {
+		mtu = 1280
+	}
+	mtuLine := fmt.Sprintf("MTU = %d", mtu)
 	lines := strings.Split(raw, "\n")
 	out := make([]string, 0, len(lines)+2)
 	inInterface := false
@@ -35,17 +35,14 @@ func patchWGConfig(raw string) string {
 		}
 
 		if inInterface {
-			// Убираем любые формы DNS-строк (DNS, DNS =, dns = 1.1.1.1)
 			if strings.HasPrefix(strings.ToLower(trimmed), "dns") {
 				continue
 			}
-			// Не дублируем MTU, если сервер его уже прислал
 			if strings.HasPrefix(strings.ToLower(trimmed), "mtu") {
 				continue
 			}
 		}
 
-		// Вставляем MTU сразу после [Interface]
 		if trimmed == "[Interface]" {
 			out = append(out, line, mtuLine)
 			continue
@@ -56,4 +53,3 @@ func patchWGConfig(raw string) string {
 
 	return strings.Join(out, "\n")
 }
-

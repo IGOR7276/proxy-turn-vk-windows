@@ -303,14 +303,11 @@ func (c *Core) Start(ctx context.Context) (<-chan Event, error) {
 		customDNS = []string{"8.8.8.8", "1.1.1.1"}
 	}
 
-	go func() {
-		defer close(configDone)
-		defer TeardownWindowsWireGuard()
-		applyConfig := func(rawConf string, fromCache bool) {
-			finalConf := patchWGConfig(rawConf)
-			if c.cfg.WGConfigMTU > 0 {
-				finalConf = injectMTU(finalConf, c.cfg.WGConfigMTU)
-			}
+		go func() {
+			defer close(configDone)
+			defer TeardownWindowsWireGuard()
+			applyConfig := func(rawConf string, fromCache bool) {
+				finalConf := patchWGConfig(rawConf, c.cfg.WGConfigMTU)
 			log.Println("╔══════════════ WireGuard Конфиг ══════════════╗")
 			for _, line := range strings.Split(finalConf, "\n") {
 				log.Printf("║ %-44s ║", line)
@@ -513,20 +510,5 @@ func (c *Core) emit(ev Event) {
 	}
 }
 
-// injectMTU — вписывает/заменяет MTU в WG-конфиге (если его там нет).
-func injectMTU(conf string, mtu int) string {
-	lines := strings.Split(conf, "\n")
-	hasMTU := false
-	for i, l := range lines {
-		tl := strings.TrimSpace(l)
-		if strings.HasPrefix(strings.ToLower(tl), "mtu =") || strings.HasPrefix(strings.ToLower(tl), "mtu=") {
-			lines[i] = fmt.Sprintf("MTU = %d", mtu)
-			hasMTU = true
-		}
-	}
-	if !hasMTU {
-		lines = append(lines, fmt.Sprintf("MTU = %d", mtu))
-	}
-	return strings.Join(lines, "\n")
-}
+
 
