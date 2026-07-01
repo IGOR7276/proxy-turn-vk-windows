@@ -13,7 +13,6 @@ import (
 
 	fhttp "github.com/bogdanfinn/fhttp"
 	tlsclient "github.com/bogdanfinn/tls-client"
-	"github.com/bogdanfinn/tls-client/profiles"
 	"github.com/google/uuid"
 )
 
@@ -131,7 +130,7 @@ func getVKCredsViaVKCallsPath(ctx context.Context, link string, streamID int) (s
 
 	client, err := tlsclient.NewHttpClient(tlsclient.NewNoopLogger(),
 		tlsclient.WithTimeoutSeconds(20),
-		tlsclient.WithClientProfile(profiles.Chrome_146),
+		tlsclient.WithClientProfile(GetTLSProfile()),
 		tlsclient.WithCookieJar(tlsclient.NewCookieJar()),
 	)
 	if err != nil {

@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/bogdanfinn/tls-client/profiles"
 )
 
 // Profile holds consistent browser fingerprint headers for TLS+HTTP requests.
@@ -105,7 +107,7 @@ var profileList = []Profile{
 	},
 	{
 		UserAgent:       "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0",
-		SecChUa:         `"Not/A=Brand";v="8", "Firefox";v="132", "Mozilla";v="132"`,
+		SecChUa:         `"Not/A=Brand";v="8", "Firefox";v="132"`,
 		SecChUaMobile:   "?0",
 		SecChUaPlatform: `"Windows"`,
 	},
@@ -129,8 +131,8 @@ var safariProfiles = []Profile{
 
 var androidProfiles = []Profile{
 	{
-		UserAgent:       "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Mobile Safari/537.36",
-		SecChUa:         `"Chromium";v="129", "Not-A.Brand";v="24", "Google Chrome";v="129"`,
+		UserAgent:       "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
+		SecChUa:         `"Chromium";v="131", "Not-A.Brand";v="24", "Google Chrome";v="131"`,
 		SecChUaMobile:   "?1",
 		SecChUaPlatform: `"Android"`,
 	},
@@ -169,6 +171,22 @@ func getRandomProfile() Profile {
 	default:
 		// chrome, or unknown, pick from first few chrome profiles
 		return profileList[rand.Intn(3)]
+	}
+}
+
+// GetTLSProfile returns a TLS client profile matching the active fingerprint.
+func GetTLSProfile() profiles.ClientProfile {
+	switch activeFingerprint {
+	case "firefox":
+		return profiles.Firefox_147
+	case "safari":
+		return profiles.Safari_16_0
+	case "ios":
+		return profiles.Safari_IOS_18_5
+	case "android":
+		return profiles.Chrome_131
+	default:
+		return profiles.Chrome_146
 	}
 }
 

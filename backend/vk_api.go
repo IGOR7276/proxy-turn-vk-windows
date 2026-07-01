@@ -14,9 +14,9 @@ import (
 
 	fhttp "github.com/bogdanfinn/fhttp"
 	tlsclient "github.com/bogdanfinn/tls-client"
-	"github.com/bogdanfinn/tls-client/profiles"
 	"github.com/google/uuid"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
+	"wg-turn-client/core"
 )
 
 const (
@@ -47,7 +47,7 @@ func fetchVkTurnCreds(token, link, deviceID string) (user, pass string, urls []s
 	jar := tlsclient.NewCookieJar()
 	client, err := tlsclient.NewHttpClient(tlsclient.NewNoopLogger(), []tlsclient.HttpClientOption{
 		tlsclient.WithCookieJar(jar),
-		tlsclient.WithClientProfile(profiles.Chrome_146),
+		tlsclient.WithClientProfile(core.GetTLSProfile()),
 		tlsclient.WithInsecureSkipVerify(),
 	}...)
 	if err != nil {
@@ -61,7 +61,7 @@ func fetchVkTurnCreds(token, link, deviceID string) (user, pass string, urls []s
 			return nil, err
 		}
 		req.Host = u.Hostname()
-		req.Header.Set("User-Agent", "VKAndroidApp/7.23-14606 (Android 14; SDK 34; arm64-v8a; en; 1)")
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36")
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		req.Header.Set("Accept", "*/*")
 		req.Header.Set("Origin", "https://vk.ru")
@@ -211,7 +211,7 @@ func newVkHttpClient() (tlsclient.HttpClient, error) {
 	jar := tlsclient.NewCookieJar()
 	return tlsclient.NewHttpClient(tlsclient.NewNoopLogger(), []tlsclient.HttpClientOption{
 		tlsclient.WithCookieJar(jar),
-		tlsclient.WithClientProfile(profiles.Chrome_146),
+		tlsclient.WithClientProfile(core.GetTLSProfile()),
 		tlsclient.WithInsecureSkipVerify(),
 	}...)
 }
@@ -223,7 +223,7 @@ func vkApiPost(client tlsclient.HttpClient, data, apiURL string) (map[string]int
 		return nil, err
 	}
 	req.Host = u.Hostname()
-	req.Header.Set("User-Agent", "VKAndroidApp/7.23-14606 (Android 14; SDK 34; arm64-v8a; en; 1)")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36")
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("Origin", "https://vk.ru")
