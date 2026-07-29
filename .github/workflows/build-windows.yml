@@ -2,10 +2,9 @@ name: Build Windows
 
 # Собирает Windows-бинарник WDTT и выкладывает его как artifact,
 # чтобы можно было скачать и проверить вживую.
+# Запускается ТОЛЬКО вручную (Actions → Build Windows → Run workflow),
+# автоматически на push не срабатывает.
 on:
-  push:
-    branches:
-      - claude/wdtt-desktop-port-issue-7n8yaw
   workflow_dispatch: {}
 
 jobs:
