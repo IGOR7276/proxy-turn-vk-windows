@@ -718,44 +718,157 @@ func GetCreds(ctx context.Context, link string, streamID int) (string, string, [
 
 // ─── DNS dialer setup ───
 
+// publicDNSServers — фолбэк-резолверы на случай, когда системный DNS
+// молчит (перехват/фильтрация провайдером). Пробуются ТОЛЬКО если системный
+// сервер не ответил, и с реальной проверкой ответа (см. dnsServerResponds).
+var publicDNSServers = []string{
+	"77.88.8.8:53",      // Яндекс
+	"77.88.8.1:53",      // Яндекс резерв
+	"8.8.8.8:53",        // Google
+	"1.1.1.1:53",        // Cloudflare
+	"9.9.9.9:53",        // Quad9
+	"208.67.222.222:53", // OpenDNS
+}
+
+// dnsGoodServer кэширует последний DNS-сервер, который реально ответил, чтобы
+// не перебирать весь список на каждый lookup.
+var (
+	dnsGoodMu     sync.Mutex
+	dnsGoodServer string
+)
+
+func cachedGoodDNS() string {
+	dnsGoodMu.Lock()
+	defer dnsGoodMu.Unlock()
+	return dnsGoodServer
+}
+
+func setCachedGoodDNS(server string) {
+	dnsGoodMu.Lock()
+	dnsGoodServer = server
+	dnsGoodMu.Unlock()
+}
+
+// setupGlobalResolver подменяет net.DefaultResolver так, чтобы на этапе
+// bootstrap (до поднятия туннеля) DNS резолвился надёжно.
+//
+// Раньше здесь была фатальная ошибка: кастомный Dial всегда «успешно»
+// открывал UDP-сокет к первому публичному серверу (77.88.8.8) и возвращал его,
+// НЕ проверяя, что сервер вообще отвечает. Для UDP DialContext не шлёт пакетов
+// и не может завершиться ошибкой на недоступном хосте, поэтому фолбэк на
+// системный DNS (тот же, что у браузера — на Windows Go берёт его через
+// GetAdaptersAddresses и передаёт в параметр address) был мёртвым кодом.
+// В сетях, где провайдер режет прямой :53 к публичным DNS, это давало
+// `lookup <host>: i/o timeout`, хотя браузер тот же домен открывал.
+//
+// Теперь: сначала пробуем системный DNS (address), затем публичные — и каждый
+// сервер проверяем настоящим DNS-запросом с коротким дедлайном, беря первый,
+// который ОТВЕТИЛ. Сперва весь список по UDP, потом по TCP (UDP/53 может быть
+// заблокирован).
 func setupGlobalResolver() {
 	dialer := &net.Dialer{
-		Timeout:   2 * time.Second,
+		Timeout:   3 * time.Second,
 		KeepAlive: 30 * time.Second,
-	}
-	dnsServers := []string{
-		"77.88.8.8:53",  // Яндекс
-		"77.88.8.1:53",  // Яндекс резерв
-		"8.8.8.8:53",    // Google
-		"1.1.1.1:53",    // Cloudflare
-		"9.9.9.9:53",    // Quad9
-		"208.67.222.222:53", // OpenDNS
 	}
 
 	net.DefaultResolver = &net.Resolver{
 		PreferGo: true,
 		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-			var lastErr error
-			for _, dns := range dnsServers {
-				conn, err := dialer.DialContext(ctx, "udp", dns)
-				if err == nil {
-					return conn, nil
+			// Порядок кандидатов: кэш → системный DNS → публичные фолбэки.
+			candidates := make([]string, 0, len(publicDNSServers)+2)
+			seen := make(map[string]struct{})
+			add := func(s string) {
+				if s == "" {
+					return
 				}
-				conn, err = dialer.DialContext(ctx, "tcp", dns)
-				if err == nil {
-					return conn, nil
+				if _, ok := seen[s]; ok {
+					return
 				}
-				lastErr = err
+				seen[s] = struct{}{}
+				candidates = append(candidates, s)
 			}
-			if address != "" {
-				conn, err := dialer.DialContext(ctx, network, address)
-				if err == nil {
+			add(cachedGoodDNS())
+			add(address)
+			for _, s := range publicDNSServers {
+				add(s)
+			}
+
+			// Пас 1 — UDP (основной транспорт DNS), пас 2 — TCP (фолбэк,
+			// если UDP/53 фильтруется).
+			for _, netw := range []string{"udp", "tcp"} {
+				for _, srv := range candidates {
+					if err := ctx.Err(); err != nil {
+						return nil, err
+					}
+					if !dnsServerResponds(ctx, dialer, netw, srv) {
+						continue
+					}
+					conn, err := dialer.DialContext(ctx, netw, srv)
+					if err != nil {
+						continue
+					}
+					setCachedGoodDNS(srv)
 					return conn, nil
 				}
-				lastErr = err
 			}
-			return nil, lastErr
+			return nil, fmt.Errorf("ни один DNS-сервер не ответил (проверено %d)", len(candidates))
 		},
 	}
 }
 
+// dnsServerResponds проверяет, что DNS-сервер по адресу server отвечает на
+// запросы по указанному транспорту (udp/tcp). Шлёт минимальный A-запрос и
+// ждёт любой валидный ответ с коротким дедлайном. Для UDP это единственный
+// надёжный способ понять доступность — сам факт «сокет создан» ничего не значит.
+func dnsServerResponds(ctx context.Context, dialer *net.Dialer, network, server string) bool {
+	const probeTimeout = 900 * time.Millisecond
+	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+
+	conn, err := dialer.DialContext(probeCtx, network, server)
+	if err != nil {
+		return false
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(probeTimeout))
+
+	query := buildDNSProbeQuery("api.vk.me")
+	if network == "tcp" {
+		// DNS over TCP: сообщение предваряется 2-байтовым префиксом длины.
+		framed := append([]byte{byte(len(query) >> 8), byte(len(query))}, query...)
+		if _, err := conn.Write(framed); err != nil {
+			return false
+		}
+	} else if _, err := conn.Write(query); err != nil {
+		return false
+	}
+
+	buf := make([]byte, 512)
+	n, err := conn.Read(buf)
+	return err == nil && n > 0
+}
+
+// buildDNSProbeQuery собирает минимальный DNS-запрос типа A для указанного имени.
+// Transaction ID фиксирован — нам важен только факт ответа, а не его содержимое
+// (ответ читается на отдельном probe-сокете и отбрасывается).
+func buildDNSProbeQuery(name string) []byte {
+	q := []byte{
+		0x12, 0x34, // ID
+		0x01, 0x00, // flags: RD=1
+		0x00, 0x01, // QDCOUNT=1
+		0x00, 0x00, // ANCOUNT
+		0x00, 0x00, // NSCOUNT
+		0x00, 0x00, // ARCOUNT
+	}
+	for _, label := range strings.Split(name, ".") {
+		if label == "" {
+			continue
+		}
+		q = append(q, byte(len(label)))
+		q = append(q, []byte(label)...)
+	}
+	q = append(q, 0x00)       // конец QNAME
+	q = append(q, 0x00, 0x01) // QTYPE = A
+	q = append(q, 0x00, 0x01) // QCLASS = IN
+	return q
+}
