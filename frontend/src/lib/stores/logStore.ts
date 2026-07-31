@@ -46,6 +46,9 @@ function assignKey(message: string, level: LogLevel): { key?: string; priority?:
   if (message.includes('[СОСТОЯНИЕ]')) {
     return { key: 'state', priority: 1 };
   }
+  if (message.startsWith('[СХЕМА]')) {
+    return { key: 'pipeline_error', priority: 1 };
+  }
   if (message.includes('[ОШИБКА]')) {
     return { key: 'error_' + Math.random().toString(36).slice(2, 6), priority: 99 };
   }

@@ -5,18 +5,22 @@ export interface Server {
   password: string;
   deviceId?: string;
   ping?: number;
+  port?: number;      // listen port from subscription profile
 
   // Per-profile overrides
   hashes: [string, string, string, string];   // 4 VK hash slots
   useGlobalHashes: boolean;                    // true → игнорировать свои хеши, брать из settings
   power: number;                              // 1-100 воркеров (default 9)
+  subscriptionId?: string;                    // если профиль пришёл из подписки
 }
 
 export type DnsProvider = 'google' | 'cloudflare' | 'yandex' | 'custom';
 export type CloseAction = 'ask' | 'hide' | 'exit';
 export type Fingerprint = 'chrome' | 'safari' | 'ios' | 'android' | 'firefox';
+export type ObfsMode = 'audio' | 'video';
 
 export const FINGERPRINT_OPTIONS: Fingerprint[] = ['chrome', 'safari', 'ios', 'android', 'firefox'];
+export const OBFS_MODE_OPTIONS: ObfsMode[] = ['audio', 'video'];
 
 export interface AppSettings {
   bypassMode: 'РУЧ' | 'АВТ';
@@ -36,9 +40,23 @@ export interface AppSettings {
   wgInterface: string;          // имя WG-интерфейса (default "WDTT")
 
   closeAction: CloseAction;     // действие при нажатии X (default 'ask' = показать диалог)
+  obfsMode: ObfsMode;           // режим маскировки RTP: audio (OPUS/PT111) или video (H264/PT96)
 }
 
 export type TunnelState = 'idle' | 'connecting' | 'connected' | 'disconnecting';
+
+export interface Subscription {
+  id: string;
+  url: string;
+  name: string;
+  description?: string;
+  trafficUsedMb?: number;
+  trafficLimitMb?: number;
+  updatedAt?: string;
+  version?: number;
+  lastSyncAt?: string;
+  lastSyncError?: string;
+}
 
 export interface DeployConfig {
   host: string;
@@ -77,6 +95,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   autoWG: true,
   wgInterface: 'WDTT',
   closeAction: 'ask',
+  obfsMode: 'audio',
 };
 
 export const DNS_PRESETS: Record<Exclude<DnsProvider, 'custom'>, { name: string; servers: string }> = {

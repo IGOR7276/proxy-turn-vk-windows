@@ -31,16 +31,21 @@ func RequestConfig(conn net.Conn, localPort, deviceID, password string) (string,
 
 	if strings.HasPrefix(resp, "DENIED:") {
 		reason := strings.TrimPrefix(resp, "DENIED:")
+		var authErr error
 		switch reason {
 		case "wrong_password":
-			return "", fmt.Errorf("FATAL_AUTH: неверный пароль подключения")
+			authErr = fmt.Errorf("FATAL_AUTH: неверный пароль подключения")
 		case "expired":
-			return "", fmt.Errorf("FATAL_AUTH: срок действия пароля истёк")
+			authErr = fmt.Errorf("FATAL_AUTH: срок действия пароля истёк")
 		case "device_mismatch":
-			return "", fmt.Errorf("FATAL_AUTH: пароль привязан к другому устройству")
+			authErr = fmt.Errorf("FATAL_AUTH: пароль привязан к другому устройству")
 		default:
-			return "", fmt.Errorf("FATAL_AUTH: доступ запрещён (%s)", reason)
+			authErr = fmt.Errorf("FATAL_AUTH: доступ запрещён (%s)", reason)
 		}
+		if EmitEvent != nil {
+			EmitEvent(Event{Type: EventEvent, Name: "fatal_auth", Data: authErr.Error()})
+		}
+		return "", authErr
 	}
 
 	return resp, nil

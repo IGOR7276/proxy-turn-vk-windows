@@ -40,21 +40,25 @@ func init() {
 
 var TurnCredsResultChan = make(chan TurnCredsPayload, 1)
 
-func SetVkAuthMode(mode string) string {
+func normalizeVkAuthMode(mode string) string {
 	mode = strings.ToLower(strings.TrimSpace(mode))
-	if mode != "anonymous" {
-		mode = "account"
+	switch mode {
+	case "account", "anonymous", "legacy":
+		return mode
+	default:
+		return "anonymous"
 	}
+}
+
+func SetVkAuthMode(mode string) string {
+	mode = normalizeVkAuthMode(mode)
 	vkAuthModeValue.Store(mode)
 	return mode
 }
 
 func GetVkAuthMode() string {
 	mode, _ := vkAuthModeValue.Load().(string)
-	if mode == "" {
-		return "anonymous"
-	}
-	return mode
+	return normalizeVkAuthMode(mode)
 }
 
 func drainTurnCredsResult() {

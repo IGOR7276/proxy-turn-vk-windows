@@ -709,19 +709,6 @@ func ensureWintunDLL() error {
 		}
 	}
 
-	// Fallback: %LOCALAPPDATA%\wdtt\
-	if len(wintunEmbedded) > 0 {
-		if localAppData := os.Getenv("LOCALAPPDATA"); localAppData != "" {
-			localTarget := filepath.Join(localAppData, "wdtt", "wintun.dll")
-			_ = os.MkdirAll(filepath.Dir(localTarget), 0755)
-			if err := os.WriteFile(localTarget, wintunEmbedded, 0644); err == nil {
-				log.Printf("[WG] Извлечён встроенный wintun.dll → %s", localTarget)
-				_ = copyFile(localTarget, target)
-				return nil
-			}
-		}
-	}
-
 	// Искать установленный WireGuard/Happ или System32
 	candidates := findWintunDLLs()
 	for _, src := range candidates {

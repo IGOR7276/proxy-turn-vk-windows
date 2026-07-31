@@ -9,7 +9,9 @@
 			"FileDescription": "{{.Info.ProductName}}",
 			"LegalCopyright": "{{.Info.Copyright}}",
 			"ProductName": "{{.Info.ProductName}}",
-			"Comments": "{{.Info.Comments}}"
+			"Comments": "{{.Info.Comments}}",
+			"OriginalFilename": "wdtt.exe",
+			"InternalName": "wdtt"
 		}
 	}
 }

@@ -179,6 +179,9 @@ func RunSession(
 	getStreamCache(creds.CacheStreamID).errorCount.Store(0)
 
 	log.Printf("[СЕССИЯ #%d] Relay: %s", sessionID, relay.LocalAddr())
+	if EmitEvent != nil {
+		EmitEvent(Event{Type: EventEvent, Name: "turn_allocated", Data: fmt.Sprintf("session=%d", sessionID)})
+	}
 
 	// Pipe для DTLS ↔ TURN relay
 	pipeA, pipeB := connutil.AsyncPacketPipe()
@@ -216,7 +219,7 @@ func RunSession(
 	var obfsCfg *ObfsConfig
 	var obfsWriteState *ObfsState
 	if useWrap {
-		obfsCfg = NewObfsConfig()
+		obfsCfg = NewObfsConfig(tp.ObfsMode)
 		obfsWriteState = NewObfsState()
 	}
 
@@ -331,12 +334,26 @@ func RunSession(
 			errStr := strings.ToLower(err.Error())
 			if strings.Contains(errStr, "deadline") || strings.Contains(errStr, "timeout") {
 				log.Printf("[ВОРКЕР #%d] [DTLS] Таймаут хендшейка (15s) с WRAP, пароль/WRAP не подтверждён", sessionID)
+				if EmitEvent != nil {
+					EmitEvent(Event{Type: EventEvent, Name: "wrap_auth_timeout", Data: fmt.Sprintf("worker=%d", sessionID)})
+				}
 				return false, fmt.Errorf("WRAP_AUTH_TIMEOUT: DTLS timeout, пароль/WRAP не подтверждён")
 			}
+		}
+		if EmitEvent != nil {
+			EmitEvent(Event{Type: EventEvent, Name: "dtls_error", Data: fmt.Sprintf("worker=%d error=%s", sessionID, err.Error())})
 		}
 		return false, fmt.Errorf("DTLS хендшейк: %w", err)
 	}
 	log.Printf("[ВОРКЕР #%d] [DTLS] Соединение установлено ✓", sessionID)
+	if EmitEvent != nil {
+		EmitEvent(Event{Type: EventEvent, Name: "dtls_ok", Data: fmt.Sprintf("worker=%d", sessionID)})
+	}
+
+	// Emit ready event once the first worker completes DTLS handshake.
+	if EmitEvent != nil {
+		EmitEvent(Event{Type: EventEvent, Name: "ready", Data: fmt.Sprintf("worker=%d", sessionID)})
+	}
 
 	atomic.AddInt32(&stats.ActiveConnections, 1)
 	defer atomic.AddInt32(&stats.ActiveConnections, -1)
@@ -365,6 +382,9 @@ func RunSession(
 	}
 
 	log.Printf("[ВОРКЕР #%d] [READY] Туннель готов к работе ✓", sessionID)
+	if EmitEvent != nil {
+		EmitEvent(Event{Type: EventEvent, Name: "worker_ready", Data: fmt.Sprintf("worker=%d", sessionID)})
+	}
 
 	// Регистрация в диспетчере
 	slot := &WorkerSlot{

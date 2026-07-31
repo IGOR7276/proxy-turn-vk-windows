@@ -149,6 +149,7 @@ type ProfileData struct {
 	DeviceID    string   `json:"device_id,omitempty"`
 	Fingerprint string   `json:"fingerprint,omitempty"`
 	ClientIDs   string   `json:"client_ids,omitempty"`
+	ObfsMode    string   `json:"obfsMode,omitempty"`
 }
 
 // ConnectParams — runtime параметры от UI.
@@ -160,6 +161,16 @@ type ConnectParams struct {
 	Fingerprint string   `json:"fingerprint,omitempty"`
 	MTU         int      `json:"mtu,omitempty"`
 	Hashes      []string `json:"hashes,omitempty"`
+	ObfsMode    string   `json:"obfsMode,omitempty"`
+
+	// Runtime profile data (used for subscription-sourced profiles that have no file in profiles/).
+	PeerAddr string   `json:"peer,omitempty"`
+	Password string   `json:"password,omitempty"`
+	Listen   string   `json:"listen,omitempty"`
+	TurnHost string   `json:"turn,omitempty"`
+	TurnPort string   `json:"port,omitempty"`
+	DeviceID string   `json:"device_id,omitempty"`
+	PHashes  []string `json:"profileHashes,omitempty"`
 
 	// Флаги окружения (наш уникальный функционал)
 	AutoWG      bool     `json:"autoWG,omitempty"`
@@ -190,6 +201,160 @@ type coreSession struct {
 	done   chan struct{}    // закрывается когда forwardEvents полностью вышел (включая WG-teardown)
 }
 
+// connectionStep — этапы подключения, отслеживаемые pipeline.
+type connectionStep string
+
+const (
+	stepStart    connectionStep = "start"
+	stepDNS      connectionStep = "dns"
+	stepVK       connectionStep = "vk"
+	stepCaptcha  connectionStep = "captcha"
+	stepWrap     connectionStep = "wrap"
+	stepTurn     connectionStep = "turn"
+	stepDTLS     connectionStep = "dtls"
+	stepWorkers  connectionStep = "workers"
+	stepWG       connectionStep = "wg"
+	stepDone     connectionStep = "done"
+	stepFailed   connectionStep = "failed"
+)
+
+// pipelineState — текущее состояние схемы подключения.
+type pipelineState struct {
+	Visible    bool           `json:"visible"`
+	Current    connectionStep `json:"current"`
+	Completed  []string       `json:"completed"`
+	Failed     *string        `json:"failed,omitempty"`
+	TimedOut   bool           `json:"timedOut"`
+	TimeoutSec int            `json:"timeoutSec"`
+}
+
+// pipelineController следит за этапами подключения и останавливает туннель при ошибках/таймаутах.
+type pipelineController struct {
+	ctx       context.Context
+	cancel    context.CancelFunc
+	mu        sync.Mutex
+	state     pipelineState
+	sess      *coreSession
+	stopFunc  func()
+	timer     *time.Timer
+}
+
+func newPipelineController(stopFunc func()) *pipelineController {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &pipelineController{
+		ctx:      ctx,
+		cancel:   cancel,
+		stopFunc: stopFunc,
+		state: pipelineState{
+			Visible:   true,
+			Current:   stepDNS,
+			Completed: []string{},
+		},
+	}
+}
+
+func (pc *pipelineController) emitState(appCtx context.Context) {
+	runtime.EventsEmit(appCtx, "pipeline_state", pc.state)
+}
+
+func (pc *pipelineController) setCurrent(appCtx context.Context, step connectionStep) {
+	pc.mu.Lock()
+	if pc.state.Failed != nil {
+		pc.mu.Unlock()
+		return
+	}
+	pc.state.Current = step
+	pc.state.TimedOut = false
+	pc.mu.Unlock()
+	pc.armTimeout(appCtx, step)
+	pc.emitState(appCtx)
+}
+
+func (pc *pipelineController) markCompleted(appCtx context.Context, step connectionStep) {
+	pc.mu.Lock()
+	if pc.state.Failed != nil {
+		pc.mu.Unlock()
+		return
+	}
+	found := false
+	for _, c := range pc.state.Completed {
+		if c == string(step) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		pc.state.Completed = append(pc.state.Completed, string(step))
+	}
+	pc.mu.Unlock()
+	pc.emitState(appCtx)
+}
+
+func (pc *pipelineController) markFailed(appCtx context.Context, step connectionStep, timedOut bool, timeoutSec int, reason string) {
+	pc.mu.Lock()
+	if pc.state.Failed != nil {
+		pc.mu.Unlock()
+		return
+	}
+	failed := string(step)
+	pc.state.Failed = &failed
+	pc.state.TimedOut = timedOut
+	pc.state.TimeoutSec = timeoutSec
+	pc.state.Current = step
+	pc.mu.Unlock()
+	if pc.timer != nil {
+		pc.timer.Stop()
+		pc.timer = nil
+	}
+	pc.emitState(appCtx)
+	runtime.EventsEmit(appCtx, "log", "ERROR", fmt.Sprintf("[СХЕМА] Ошибка на этапе %s: %s", step, reason))
+	go pc.stopFunc()
+}
+
+func (pc *pipelineController) finish(appCtx context.Context) {
+	pc.mu.Lock()
+	pc.state.Current = stepDone
+	pc.state.Completed = append(pc.state.Completed, string(stepDone))
+	pc.mu.Unlock()
+	if pc.timer != nil {
+		pc.timer.Stop()
+		pc.timer = nil
+	}
+	pc.emitState(appCtx)
+}
+
+func (pc *pipelineController) hide() {
+	pc.mu.Lock()
+	pc.state.Visible = false
+	pc.mu.Unlock()
+}
+
+func (pc *pipelineController) armTimeout(appCtx context.Context, step connectionStep) {
+	if pc.timer != nil {
+		pc.timer.Stop()
+		pc.timer = nil
+	}
+	// Workers и captcha могут ждать пользователя; WG — зависит от системы.
+	if step == stepWorkers || step == stepCaptcha || step == stepWG {
+		return
+	}
+	timeout := 12 * time.Second
+	if step == stepVK {
+		timeout = 30 * time.Second
+	}
+	pc.timer = time.AfterFunc(timeout, func() {
+		pc.markFailed(appCtx, step, true, int(timeout.Seconds()), "таймаут этапа")
+	})
+}
+
+func (pc *pipelineController) close() {
+	pc.cancel()
+	if pc.timer != nil {
+		pc.timer.Stop()
+		pc.timer = nil
+	}
+}
+
 // Orchestrator — тонкий прокси между Wails UI и core.Core.
 type Orchestrator struct {
 	appCtx        context.Context
@@ -197,6 +362,7 @@ type Orchestrator struct {
 	sess          *coreSession
 	prevLogWriter io.Writer
 	onTray        func(connected bool, rx, tx int64, workers int32)
+	pipeline      *pipelineController
 }
 
 func NewOrchestrator(ctx context.Context, onTray func(bool, int64, int64, int32)) *Orchestrator {
@@ -239,9 +405,24 @@ func (o *Orchestrator) launch(p ConnectParams) (*coreSession, error) {
 	lw.start()
 	log.SetOutput(lw)
 
-	prof, err := loadProfile(p.Profile)
-	if err != nil {
-		return nil, err
+	var prof *ProfileData
+	if p.PeerAddr != "" {
+		// Runtime profile data provided (e.g. subscription profiles) — use it directly.
+		prof = &ProfileData{
+			PeerAddr: p.PeerAddr,
+			Password: p.Password,
+			Hashes:   p.PHashes,
+			Listen:   p.Listen,
+			TurnHost: p.TurnHost,
+			TurnPort: p.TurnPort,
+			DeviceID: p.DeviceID,
+		}
+	} else {
+		var err error
+		prof, err = loadProfile(p.Profile)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	workers := p.Workers
@@ -303,6 +484,7 @@ func (o *Orchestrator) launch(p ConnectParams) (*coreSession, error) {
 		NoDNSProxy:     noDNS,
 		WGInterface:    wgIfaceName,
 		ExcludeDomains: p.ExcludeDomains,
+		ObfsMode:       p.ObfsMode,
 	}
 
 	// Регистрируем WebView2-решатель капчи для Windows
@@ -315,6 +497,9 @@ func (o *Orchestrator) launch(p ConnectParams) (*coreSession, error) {
 	}
 
 	sess := &coreSession{c: c, doneCh: events, done: make(chan struct{})}
+	o.mu.Lock()
+	o.pipeline = newPipelineController(func() { o.Stop() })
+	o.mu.Unlock()
 	go o.forwardEvents(sess)
 	// Polling-цикл статистики для tray-иконки.
 	if o.onTray != nil {
@@ -356,31 +541,11 @@ func (o *Orchestrator) forwardEvents(sess *coreSession) {
 					runtime.EventsEmit(o.appCtx, "vk_auth_required", hash)
 				}
 			}
-			// FATAL_AUTH → автостоп + дружелюбное сообщение.
-			// Без автостопа 9 воркеров продолжают долбить VK, накапливая 401.
-			if strings.Contains(ev.Msg, "FATAL_AUTH") {
-				friendly := ev.Msg
-				switch {
-				case strings.Contains(friendly, "неверный пароль"):
-					friendly = "Неверный пароль подключения"
-				case strings.Contains(friendly, "истёк"):
-					friendly = "Срок действия пароля истёк"
-				case strings.Contains(friendly, "другому устройству"):
-					friendly = "Пароль привязан к другому устройству"
-				case strings.Contains(friendly, "запрещён"):
-					friendly = "Доступ запрещён сервером"
-				}
-				runtime.EventsEmit(o.appCtx, "error", friendly)
-				go func() {
-					if sess.c != nil {
-						sess.c.Stop()
-					}
-				}()
-			}
 		case core.EventError:
 			runtime.EventsEmit(o.appCtx, "error", ev.Msg)
 			runtime.EventsEmit(o.appCtx, "log", "ERROR", fmt.Sprintf("[ОШИБКА] %s", ev.Msg))
 		case core.EventEvent:
+			o.handlePipelineEvent(ev)
 			if ev.Name == "wg_config" {
 				runtime.EventsEmit(o.appCtx, "log", "INFO", "[WG] Применение конфига...")
 				runtime.EventsEmit(o.appCtx, "log", "INFO", "[WG] Конфиг применён, туннель активен ✓")
@@ -391,6 +556,9 @@ func (o *Orchestrator) forwardEvents(sess *coreSession) {
 			}
 			if ev.Name == "vk_auth_required" {
 				runtime.EventsEmit(o.appCtx, "vk_auth_required", ev.Data)
+			}
+			if ev.Name == "fatal_auth" {
+				runtime.EventsEmit(o.appCtx, "error", ev.Data)
 			}
 			runtime.EventsEmit(o.appCtx, "event", ev.Name, ev.Data)
 		}
@@ -412,12 +580,60 @@ func (o *Orchestrator) forwardEvents(sess *coreSession) {
 	}
 	ts := time.Now().Format("15:04:05")
 	runtime.EventsEmit(o.appCtx, "log", "INFO", fmt.Sprintf("[%s] Сессия завершена", ts))
+	runtime.EventsEmit(o.appCtx, "log", "INFO", "[СОСТОЯНИЕ] Туннель остановлен")
 	o.mu.Lock()
 	if o.sess == sess {
 		o.sess = nil
 	}
+	if o.pipeline != nil {
+		o.pipeline.close()
+		o.pipeline = nil
+	}
 	o.mu.Unlock()
 	runtime.EventsEmit(o.appCtx, "state_changed", "disconnected", "")
+}
+
+func (o *Orchestrator) handlePipelineEvent(ev core.Event) {
+	o.mu.Lock()
+	pc := o.pipeline
+	o.mu.Unlock()
+	if pc == nil {
+		return
+	}
+	switch ev.Name {
+	case "pipeline_start":
+		pc.setCurrent(o.appCtx, stepDNS)
+	case "vk_creds_ok":
+		pc.markCompleted(o.appCtx, stepVK)
+		pc.setCurrent(o.appCtx, stepWrap)
+	case "captcha_required":
+		pc.setCurrent(o.appCtx, stepCaptcha)
+	case "wrap_ready":
+		pc.markCompleted(o.appCtx, stepWrap)
+		pc.setCurrent(o.appCtx, stepTurn)
+	case "turn_allocated":
+		pc.markCompleted(o.appCtx, stepTurn)
+		pc.setCurrent(o.appCtx, stepDTLS)
+	case "dtls_ok":
+		pc.markCompleted(o.appCtx, stepDTLS)
+		pc.setCurrent(o.appCtx, stepWorkers)
+	case "worker_ready":
+		pc.markCompleted(o.appCtx, stepWorkers)
+		pc.setCurrent(o.appCtx, stepWG)
+	case "wg_up":
+		pc.markCompleted(o.appCtx, stepWG)
+		pc.finish(o.appCtx)
+		case "wrap_auth_timeout":
+			reason := "WRAP/DTLS не подтверждён: неверный пароль, сервер недоступен или UDP режет оператор"
+			runtime.EventsEmit(o.appCtx, "log", "ERROR", "[СХЕМА] Ошибка DTLS: "+reason)
+			pc.markFailed(o.appCtx, stepDTLS, false, 0, reason)
+		case "dtls_error":
+			runtime.EventsEmit(o.appCtx, "log", "ERROR", "[СХЕМА] Ошибка DTLS: "+ev.Data)
+			pc.markFailed(o.appCtx, stepDTLS, false, 0, ev.Data)
+		case "fatal_auth":
+			runtime.EventsEmit(o.appCtx, "log", "ERROR", "[СХЕМА] Ошибка авторизации: "+ev.Data)
+			pc.markFailed(o.appCtx, stepDTLS, false, 0, ev.Data)
+	}
 }
 
 // Stop останавливает текущую сессию (если есть) и ЖДЁТ полного teardown.

@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"math/rand"
 	"net"
@@ -114,6 +115,9 @@ func WorkerGroup(
 	}
 
 	log.Printf("[ГРУППА #%d] Креды OK, TURN: %v, %d воркеров", groupID, creds.TurnURLs, len(workerIDs))
+	if EmitEvent != nil {
+		EmitEvent(Event{Type: EventEvent, Name: "vk_creds_ok", Data: fmt.Sprintf("group=%d urls=%d", groupID, len(creds.TurnURLs))})
+	}
 
 	var configRequestInFlight int32
 	var wg sync.WaitGroup
@@ -348,10 +352,11 @@ func normalizeVKJoinHash(input string) string {
 
 // TurnParams — конфигурация TURN
 type TurnParams struct {
-	Host    string
-	Port    string
-	Hashes  []string
-	WrapKey []byte // Password-derived WRAP key (32 bytes), nil = disabled
+	Host     string
+	Port     string
+	Hashes   []string
+	WrapKey  []byte // Password-derived WRAP key (32 bytes), nil = disabled
+	ObfsMode string // "audio" or "video" — RTP masking mode
 }
 
 // Credentials — учетные данные TURN

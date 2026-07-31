@@ -178,6 +178,19 @@ export default function Settings() {
             </div>
           </div>
 
+          <div className="sp-row">
+            <span className="sp-label">
+              <span className="sp-label-main">
+                <IconRotate size={16} />
+                Маскировка трафика
+              </span>
+              <span className="sp-label-sub">RTP payload type 111 (OPUS audio)</span>
+            </span>
+            <div className="sp-seg">
+              <button className="sp-seg-btn sp-seg-btn--active">Аудио</button>
+            </div>
+          </div>
+
           <div className={`sp-row${locked ? ' sp-row-locked' : ''}`}>
             <span className="sp-label">
               <span className="sp-label-main">MTU</span>

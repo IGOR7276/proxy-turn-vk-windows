@@ -352,7 +352,14 @@ func vkCallsCheckAPIError(resp map[string]interface{}) error {
 	if int(code) == 14 {
 		return parseVkCaptchaError(errObj)
 	}
-	return &vkCallsVKAPIError{Code: int(code), Message: msg}
+	// Non-retryable VK call errors: propagate as CallUnavailableError.
+	switch {
+	case int(code) == 951, int(code) == 954:
+	case int(code) >= 9000 && int(code) <= 9999:
+	default:
+		return &vkCallsVKAPIError{Code: int(code), Message: msg}
+	}
+	return &CallUnavailableError{Code: int(code), Message: msg}
 }
 
 func vkCallsCheckOKError(resp map[string]interface{}) error {

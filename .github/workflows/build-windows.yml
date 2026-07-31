@@ -1,0 +1,63 @@
+name: Build Windows
+# Собирает Windows-бинарник WDTT и выкладывает его как artifact,
+# чтобы можно было скачать и проверить вживую.
+# Запускается ТОЛЬКО вручную (Actions → Build Windows → Run workflow),
+# автоматически на push не срабатывает.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: true
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
+
+      - name: Build (windows/amd64)
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: 1
+          GOFLAGS: -trimpath
+        run: wails build -platform windows/amd64 -clean -ldflags "-s -w"
+
+      # Self-signed certificate reduces false-positive AV detections.
+      # Create secrets WINDOWS_CERTIFICATE and WINDOWS_CERTIFICATE_PASSWORD
+      # from a PFX exported via: New-SelfSignedCertificate -Type CodeSigningCert ...
+      - name: Sign binary (self-signed)
+        if: env.WINDOWS_CERTIFICATE != ''
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $pfx = "$env:TEMP\wdtt-sign.pfx"
+          [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE) | Set-Content -Path $pfx -Encoding Byte
+          $signtool = Get-ChildItem -Path "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $signtool) { $signtool = Get-ChildItem -Path "$env:ProgramFiles\Windows Kits\10\bin" -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue | Select-Object -First 1 }
+          if (-not $signtool) { throw "signtool.exe not found" }
+          & $signtool.FullName sign /f $pfx /p $env:WINDOWS_CERTIFICATE_PASSWORD /fd sha256 /tr http://timestamp.digicert.com /td sha256 build\bin\wdtt.exe
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wdtt-windows-amd64
+          path: build/bin/wdtt.exe
+          if-no-files-found: error

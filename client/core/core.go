@@ -30,6 +30,7 @@ type Config struct {
 	DNSUpstream  []string // -dns (если пусто — дефолт 8.8.8.8,1.1.1.1)
 	NoDNSProxy   bool     // -no-dns-proxy
 	WGConfigMTU  int      // MTU для патча конфига (0 = default 1280)
+	ObfsMode     string   // "audio" (default) or "video" RTP masking
 
 	// ExcludeDomains — список паттернов доменов для исключения из туннеля.
 	// Поддерживает wildcards (*.example.com). Гибридный режим: DNS-прокси
@@ -124,6 +125,7 @@ func New(cfg Config) *Core {
 	if cfg.Workers <= 0 {
 		cfg.Workers = 24
 	}
+	cfg.ObfsMode = NormalizeObfsMode(cfg.ObfsMode)
 	c := &Core{
 		cfg:    cfg,
 		events: make(chan Event, 256),
@@ -196,10 +198,11 @@ func (c *Core) Start(ctx context.Context) (<-chan Event, error) {
 	}
 
 	tp := &TurnParams{
-		Host:    c.cfg.TurnHost,
-		Port:    c.cfg.TurnPort,
-		Hashes:  c.cfg.Hashes,
-		WrapKey: wrapKey,
+		Host:     c.cfg.TurnHost,
+		Port:     c.cfg.TurnPort,
+		Hashes:   c.cfg.Hashes,
+		WrapKey:  wrapKey,
+		ObfsMode: c.cfg.ObfsMode,
 	}
 
 	// Слушаем с retry (5 попыток по 1с) на случай если старый процесс
@@ -264,9 +267,13 @@ func (c *Core) Start(ctx context.Context) (<-chan Event, error) {
 	log.Printf("[CORE] Слушаю: %s | Пир: %s", c.cfg.Listen, c.cfg.PeerAddr)
 	log.Printf("[CORE] Протокол: UDP")
 	log.Printf("[CORE] WRAP: %s", wrapStatus)
+	if len(wrapKey) == wrapKeyLen {
+		c.emit(Event{Type: EventEvent, Name: "wrap_ready", Data: ""})
+	}
 	log.Printf("[CORE] Device ID: %s", c.cfg.DeviceID)
 	log.Printf("[CORE] Captcha: %s", captchaStatus)
 	log.Printf("[CORE] VK Auth: %s", GetVkAuthMode())
+	log.Printf("[CORE] Obfs: %s (PT=%d)", c.cfg.ObfsMode, map[string]uint8{"audio": 111, "video": 96}[c.cfg.ObfsMode])
 	if c.cfg.AutoWG {
 		log.Printf("[CORE] Windows WG: ON (iface=%s)", c.cfg.WGInterface)
 		if !c.cfg.NoDNSProxy {
@@ -282,6 +289,7 @@ func (c *Core) Start(ctx context.Context) (<-chan Event, error) {
 	log.Println("[CORE] ═══════════════════════════════════════")
 
 	c.emit(Event{Type: EventState, Status: "starting"})
+	c.emit(Event{Type: EventEvent, Name: "pipeline_start", Data: ""})
 
 	stats := NewStats()
 	c.stats = stats
@@ -326,6 +334,7 @@ func (c *Core) Start(ctx context.Context) (<-chan Event, error) {
 				} else {
 					log.Printf("[CORE] WG %s поднят (DNS-прокси ON → %v)", c.cfg.WGInterface, customDNS)
 				}
+				c.emit(Event{Type: EventEvent, Name: "wg_up", Data: c.cfg.WGInterface})
 				c.emit(Event{Type: EventState, Status: "connected"})
 			}
 		}

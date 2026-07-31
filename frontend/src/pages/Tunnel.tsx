@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   IconHash,
@@ -11,11 +11,16 @@ import {
   IconPencil,
   IconCheck,
   IconFileImport,
+  IconWorld,
+  IconRotate,
+  IconFolder,
+  IconTrash,
 } from '@tabler/icons-react';
 import AddServer from '../modals/Add-server';
 import EditServer from '../modals/Edit-server';
 import PasteLink from '../modals/PasteLink';
 import ImportQwdtt from '../modals/ImportQwdtt';
+import AddSubscriptionModal from '../modals/AddSubscription';
 import HashEditor from '../modals/Hash';
 import Secrets from '../modals/Secrets';
 import { serverStore, settingsStore, selectionStore } from '../lib/store';
@@ -23,9 +28,10 @@ import { tunnelStore } from '../lib/stores/tunnelStore';
 import { toastStore } from '../lib/stores/toastStore';
 import { wdttLinkStore } from '../lib/utils/wdttLink';
 import { stripVkUrl } from '../lib/utils/qwdttParser';
-import { SaveProfile, Connect as WailsConnect, Disconnect as WailsDisconnect, ForceDisconnect, GetVkAuthMode, VkLogin as BackendVkLogin, VkCallJoin, GetExcludeDomains } from '../../wailsjs/go/backend/App';
+import { SaveProfile, Connect as WailsConnect, Disconnect as WailsDisconnect, ForceDisconnect, GetVkAuthMode, VkLogin as BackendVkLogin, VkCallJoin, GetExcludeDomains, ListSubscriptions, UpdateSubscription, DeleteSubscription, OpenSubscriptionFolder, GetSubscriptionProfiles } from '../../wailsjs/go/backend/App';
 import { EventsOn, EventsOff } from '../../wailsjs/runtime/runtime';
-import type { Server, TunnelState, AppSettings } from '../lib/types';
+import type { Server, TunnelState, AppSettings, Subscription } from '../lib/types';
+import type { backend } from '../../wailsjs/go/models';
 import { resolveDnsUpstream } from '../lib/types';
 
 const TUNNEL_LABEL: Record<TunnelState, string> = {
@@ -44,12 +50,42 @@ export default function Tunnel() {
     if (saved && all.some(s => s.id === saved)) return saved;
     return all[0]?.id ?? null;
   });
+
+  // Merge subscription profiles into local server store on mount.
+  useEffect(() => {
+    (async () => {
+      try {
+        const subs = await ListSubscriptions();
+        if (!Array.isArray(subs) || subs.length === 0) return;
+        const profs = await GetSubscriptionProfiles();
+        for (const sub of subs) {
+          syncSubscriptionProfiles(sub.id, profs);
+        }
+        const all = serverStore.getAll();
+        setServers(all);
+        const saved = selectionStore.get();
+        if (saved && all.some(s => s.id === saved)) {
+          setSelectedId(saved);
+        } else if (!selectedId && all.length > 0) {
+          setSelectedId(all[0].id);
+          selectionStore.set(all[0].id);
+        }
+        const subCount = all.filter(s => s.subscriptionId).length;
+        if (subCount > 0) {
+          toastStore.show(`Загружено профилей из подписок: ${subCount}`, 2500);
+        }
+      } catch {
+        // ignore
+      }
+    })();
+  }, []);
   const selected = selectedId ? servers.find(s => s.id === selectedId) ?? null : null;
-  const setSelected = (s: Server | null) => {
+  const manualServers = servers.filter(s => !s.subscriptionId);
+  const setSelected = useCallback((s: Server | null) => {
     const id = s?.id ?? null;
     setSelectedId(id);
     selectionStore.set(id);
-  };
+  }, []);
   const [tunnelState, setTunnelState] = useState<TunnelState>(() => tunnelStore.get());
   useEffect(() => tunnelStore.subscribe(setTunnelState), []);
 
@@ -65,13 +101,25 @@ export default function Tunnel() {
   const [pasteLinkOpen, setPasteLinkOpen] = useState(false);
   const [importQwdttOpen, setImportQwdttOpen] = useState(false);
   const [addServerOpen, setAddServerOpen] = useState(false);
+  const [addSubOpen, setAddSubOpen] = useState(false);
+  const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
   const [editServer, setEditServer] = useState<Server | null>(null);
   const [reconnectAt, setReconnectAt] = useState(0);
   const [vkAuthMode, setVkAuthMode] = useState<'anonymous' | 'account'>('anonymous');
+  const loadSubscriptions = async () => {
+    try {
+      const subs = await ListSubscriptions();
+      setSubscriptions(Array.isArray(subs) ? subs : []);
+    } catch {
+      setSubscriptions([]);
+    }
+  };
+
   useEffect(() => {
     GetVkAuthMode().then(mode => {
       setVkAuthMode(mode as 'anonymous' | 'account');
     }).catch(() => {});
+    loadSubscriptions();
   }, []);
 
   // wdtt:// paste handler (only if linkMode is on).
@@ -175,7 +223,7 @@ export default function Tunnel() {
         excludeDomains = [];
       }
 
-      await WailsConnect({
+      const params: backend.ConnectParams = {
         profile: cur.name,
         captchaMode: 'auto',
         vkAuthMode: vkAuthMode,
@@ -183,12 +231,21 @@ export default function Tunnel() {
         fingerprint: s.fingerprint,
         mtu: s.mtu || 1280,
         hashes: filled,
+        obfsMode: 'audio',
         autoWG: s.autoWG,
         noDNSProxy: !s.dnsProxyEnabled,
         dnsUpstream: dnsUpstream.length > 0 ? dnsUpstream : undefined,
         wgInterface: s.wgInterface || 'WDTT',
         excludeDomains: excludeDomains.length > 0 ? excludeDomains : undefined,
-      });
+      };
+      if (cur.subscriptionId) {
+        // For subscription profiles pass runtime data so the backend does not
+        // need a file in profiles/ (and avoids name collisions with manual profiles).
+        params.peer = cur.host;
+        params.password = cur.password;
+        params.listen = cur.port ? `127.0.0.1:${cur.port}` : undefined;
+      }
+      await WailsConnect(params);
       navigate('/logs');
     } catch (err) {
       tunnelStore.set('idle');
@@ -200,11 +257,11 @@ export default function Tunnel() {
   };
 
   const handleConnect = async () => {
-    if (!selectedRef.current) {
-      setAddServerOpen(true);
-      return;
-    }
     if (tunnelStateRef.current === 'idle') {
+      if (!selectedRef.current) {
+        setAddServerOpen(true);
+        return;
+      }
       if (Date.now() < reconnectAt) {
         const secs = Math.ceil((reconnectAt - Date.now()) / 1000);
         toastStore.show(`Подождите ${secs} сек.`, 2000);
@@ -232,6 +289,77 @@ export default function Tunnel() {
     const s = serverStore.add(data);
     setServers(serverStore.getAll());
     setSelected(s);
+  };
+
+  const syncSubscriptionProfiles = (subId: string, profs: Record<string, backend.ProfileData>) => {
+    // Remove stale profiles from this subscription.
+    const others = serverStore.getAll().filter(s => s.subscriptionId !== subId);
+
+    for (const [name, p] of Object.entries(profs)) {
+      const host = p.peer;
+      if (!host) continue;
+      const cleanHashes = (p.hashes || []).map(stripVkUrl).filter(Boolean);
+      const port = p.port ? parseInt(p.port, 10) : undefined;
+      const serverData: Omit<Server, 'id'> = {
+        name,
+        host,
+        password: p.password || '',
+        hashes: (cleanHashes.slice(0, 4) as [string, string, string, string]) || ['', '', '', ''],
+        useGlobalHashes: cleanHashes.length === 0,
+        power: 9,
+        subscriptionId: subId,
+        port: port && !isNaN(port) ? port : undefined,
+      };
+      const existing = others.find(s => s.host === host && s.subscriptionId === subId);
+      if (existing) {
+        const idx = others.findIndex(s => s.id === existing.id);
+        others[idx] = { ...existing, ...serverData };
+      } else {
+        const id = crypto.randomUUID();
+        others.push({ ...serverData, id });
+      }
+    }
+
+    serverStore.save(others);
+    setServers(others);
+  };
+
+  const handleSubscriptionSync = async (id: string) => {
+    try {
+      await UpdateSubscription(id);
+      const profs = await GetSubscriptionProfiles();
+      syncSubscriptionProfiles(id, profs);
+      toastStore.show('Подписка обновлена', 2500);
+      await loadSubscriptions();
+    } catch (e) {
+      toastStore.show(e instanceof Error ? e.message : 'Ошибка обновления подписки', 4000);
+    }
+  };
+
+  const handleSubscriptionDelete = async (id: string) => {
+    if (!window.confirm('Удалить подписку и все её профили?')) return;
+    try {
+      await DeleteSubscription(id);
+      // Remove all local profiles tied to this subscription.
+      const remaining = serverStore.getAll().filter(s => s.subscriptionId !== id);
+      serverStore.save(remaining);
+      setServers(remaining);
+      if (selected?.subscriptionId === id) {
+        setSelected(remaining[0] ?? null);
+      }
+      toastStore.show('Подписка удалена', 2500);
+      await loadSubscriptions();
+    } catch (e) {
+      toastStore.show(e instanceof Error ? e.message : 'Ошибка удаления', 4000);
+    }
+  };
+
+  const handleSubscriptionFolder = async (id: string) => {
+    try {
+      await OpenSubscriptionFolder(id);
+    } catch {
+      toastStore.show('Не удалось открыть папку', 2500);
+    }
   };
 
   const handleImportQwdtt = async (result: { profiles: Array<{ name: string; peer: string; hashes: string[]; workers: number; password: string }>; groupName?: string }) => {
@@ -347,11 +475,13 @@ export default function Tunnel() {
         .tn-action--filled { background: var(--accent); color: var(--accent-fg); border: 1.5px solid var(--accent); }
         .tn-action--filled:hover:not(:disabled) { opacity: 0.92; }
         .tn-action--danger { background: var(--danger); color: #fff; border: 1.5px solid var(--danger); }
-        .tn-profiles { display: flex; flex-direction: column; gap: 10px; margin: 0 16px; }
+        .tn-profiles { display: flex; flex-direction: column; gap: 18px; margin: 0 16px; }
         .tn-profiles-head { display: flex; align-items: center; justify-content: space-between; padding: 0 2px; }
         .tn-profiles-title { font-size: 12px; font-weight: 600; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.5px; }
         .tn-profiles-count { font-size: 12px; color: var(--text-4); }
-        .tn-profiles-row { display: grid; grid-template-columns: repeat(3, 220px); gap: 10px; padding: 2px 2px 6px; }
+        .tn-profiles-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; padding: 2px 2px 6px; }
+        .tn-sub-group { display: flex; flex-direction: column; gap: 14px; }
+        .tn-profiles-row--sub { padding-left: 0; margin-left: 0; }
         .tn-pcard { background: var(--surface); border: 1.5px solid var(--border); border-radius: var(--r-card); padding: 12px 14px; cursor: pointer; display: flex; flex-direction: column; gap: 6px; transition: border-color 0.12s, background 0.12s, transform 0.12s; position: relative; }
         .tn-pcard:hover { border-color: var(--text-3); transform: translateY(-1px); }
         .tn-pcard--active { border-color: var(--accent); background: var(--accent-soft); }
@@ -368,6 +498,19 @@ export default function Tunnel() {
         .tn-pcard-hashes--full { color: var(--accent); font-weight: 600; }
         .tn-pcard-add { background: transparent; border: 1.5px dashed var(--border); border-radius: var(--r-card); padding: 12px 14px; cursor: pointer; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; color: var(--text-3); font-size: 13px; font-weight: 500; transition: border-color 0.12s, color 0.12s, background 0.12s; }
         .tn-pcard-add:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+        .tn-sub-card { background: var(--surface); border: 1.5px solid var(--border); border-radius: var(--r-card); padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; }
+        .tn-sub-head { display: flex; align-items: center; gap: 10px; }
+        .tn-sub-name { flex: 1; font-size: 14px; font-weight: 600; color: var(--text); }
+        .tn-sub-actions { display: flex; align-items: center; gap: 6px; }
+        .tn-sub-btn { background: var(--bg-2); border: 1px solid var(--border); border-radius: 6px; padding: 6px; cursor: pointer; color: var(--text-3); display: flex; transition: background 0.12s, color 0.12s; }
+        .tn-sub-btn:hover { background: var(--accent-soft); color: var(--accent); }
+        .tn-sub-btn--danger:hover { background: var(--danger-soft); color: var(--danger); }
+        .tn-sub-desc { font-size: 12px; color: var(--text-3); }
+        .tn-sub-traffic { display: flex; align-items: center; gap: 10px; }
+        .tn-sub-bar { flex: 1; height: 6px; background: var(--bg-3); border-radius: var(--r-toggle); overflow: hidden; }
+        .tn-sub-bar-fill { height: 100%; background: var(--accent); border-radius: var(--r-toggle); }
+        .tn-sub-traffic-text { font-size: 11px; color: var(--text-3); font-family: 'Geist Mono', monospace; white-space: nowrap; }
+        .tn-sub-error { font-size: 11px; color: var(--danger); }
       `}</style>
 
       <div className="tn-page">
@@ -482,58 +625,147 @@ export default function Tunnel() {
           </button>
         </div>
 
-        {/* PROFILES: quick switch saved servers */}
-        {servers.length > 0 && (
+        {/* PROFILES: manual profiles first */}
+        {(manualServers.length > 0 || subscriptions.length > 0) && (
           <div className="tn-profiles">
-            <div className="tn-profiles-head">
-              <span className="tn-profiles-title">Сохранённые профили</span>
-              <span className="tn-profiles-count">{servers.length} шт.</span>
-            </div>
-            <div className="tn-profiles-row">
-              {servers.map(s => {
-                const filled = (s.useGlobalHashes ? settings.hashes : s.hashes).filter(h => h.trim()).length;
-                const isActive = selected?.id === s.id;
-                return (
-                  <div
-                    key={s.id}
-                    className={`tn-pcard${isActive ? ' tn-pcard--active' : ''}`}
-                    onClick={() => setSelected(s)}
-                  >
-                    <div className="tn-pcard-head">
-                      <span className="tn-pcard-dot" />
-                      <span className="tn-pcard-name">{s.name}</span>
-                      <button
-                        className="tn-pcard-edit"
-                        onClick={e => { e.stopPropagation(); setEditServer(s); }}
-                        title="Изменить"
+            {manualServers.length > 0 && (
+              <>
+                <div className="tn-profiles-head">
+                  <span className="tn-profiles-title">Сохранённые профили</span>
+                  <span className="tn-profiles-count">{manualServers.length} шт.</span>
+                </div>
+                <div className="tn-profiles-row">
+                  {manualServers.map(s => {
+                    const filled = (s.useGlobalHashes ? settings.hashes : s.hashes).filter(h => h.trim()).length;
+                    const isActive = selected?.id === s.id;
+                    return (
+                      <div
+                        key={s.id}
+                        className={`tn-pcard${isActive ? ' tn-pcard--active' : ''}`}
+                        onClick={() => setSelected(s)}
                       >
-                        <IconPencil size={14} />
-                      </button>
+                        <div className="tn-pcard-head">
+                          <span className="tn-pcard-dot" />
+                          <span className="tn-pcard-name">{s.name}</span>
+                          <button
+                            className="tn-pcard-edit"
+                            onClick={e => { e.stopPropagation(); setEditServer(s); }}
+                            title="Изменить"
+                          >
+                            <IconPencil size={14} />
+                          </button>
+                        </div>
+                        <div className="tn-pcard-host">{s.host}</div>
+                        <div className="tn-pcard-foot">
+                          <span className="tn-pcard-power">{s.power}w</span>
+                          <span className={`tn-pcard-hashes${filled === 4 ? ' tn-pcard-hashes--full' : ''}`}>
+                            {filled === 4 && <IconCheck size={11} />}
+                            {filled}/4 хешей
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  <button
+                    className="tn-pcard-add"
+                    onClick={() => setAddServerOpen(true)}
+                  >
+                    <IconPlus size={20} />
+                    Добавить
+                  </button>
+                </div>
+              </>
+            )}
+
+            {/* Subscriptions with their profiles */}
+            {subscriptions.map(sub => {
+              const subServers = servers.filter(s => s.subscriptionId === sub.id);
+              const trafficPct = sub.trafficLimitMb && sub.trafficLimitMb > 0
+                ? Math.min(100, Math.round((sub.trafficUsedMb || 0) / sub.trafficLimitMb * 100))
+                : 0;
+              return (
+                <div key={sub.id} className="tn-sub-group">
+                  <div className="tn-sub-card">
+                    <div className="tn-sub-head">
+                      <IconWorld size={16} style={{ color: 'var(--accent)' }} />
+                      <span className="tn-sub-name">{sub.name}</span>
+                      <div className="tn-sub-actions">
+                        <button className="tn-sub-btn" onClick={() => handleSubscriptionSync(sub.id)} title="Обновить">
+                          <IconRotate size={14} />
+                        </button>
+                        <button className="tn-sub-btn" onClick={() => handleSubscriptionFolder(sub.id)} title="Открыть папку">
+                          <IconFolder size={14} />
+                        </button>
+                        <button className="tn-sub-btn tn-sub-btn--danger" onClick={() => handleSubscriptionDelete(sub.id)} title="Удалить">
+                          <IconTrash size={14} />
+                        </button>
+                      </div>
                     </div>
-                    <div className="tn-pcard-host">{s.host}</div>
-                    <div className="tn-pcard-foot">
-                      <span className="tn-pcard-power">{s.power}w</span>
-                      <span className={`tn-pcard-hashes${filled === 4 ? ' tn-pcard-hashes--full' : ''}`}>
-                        {filled === 4 && <IconCheck size={11} />}
-                        {filled}/4 хешей
-                      </span>
-                    </div>
+                    {sub.description && <div className="tn-sub-desc">{sub.description}</div>}
+                    {sub.trafficLimitMb && sub.trafficLimitMb > 0 && (
+                      <div className="tn-sub-traffic">
+                        <div className="tn-sub-bar">
+                          <div className="tn-sub-bar-fill" style={{ width: `${trafficPct}%` }} />
+                        </div>
+                        <span className="tn-sub-traffic-text">{Math.round(sub.trafficUsedMb || 0)} / {Math.round(sub.trafficLimitMb)} МБ</span>
+                      </div>
+                    )}
+                    {sub.lastSyncError && <div className="tn-sub-error">{sub.lastSyncError}</div>}
                   </div>
-                );
-              })}
-              <button
-                className="tn-pcard-add"
-                onClick={() => setAddServerOpen(true)}
-              >
-                <IconPlus size={20} />
-                Добавить
-              </button>
-            </div>
+
+                  {subServers.length > 0 && (
+                    <div className="tn-profiles-row tn-profiles-row--sub">
+                      {subServers.map(s => {
+                        const filled = (s.useGlobalHashes ? settings.hashes : s.hashes).filter(h => h.trim()).length;
+                        const isActive = selected?.id === s.id;
+                        return (
+                          <div
+                            key={s.id}
+                            className={`tn-pcard${isActive ? ' tn-pcard--active' : ''}`}
+                            onClick={() => setSelected(s)}
+                          >
+                            <div className="tn-pcard-head">
+                              <span className="tn-pcard-dot" />
+                              <span className="tn-pcard-name">{s.name}</span>
+                            </div>
+                            <div className="tn-pcard-host">{s.host}</div>
+                            <div className="tn-pcard-foot">
+                              <span className="tn-pcard-power">{s.power}w</span>
+                              <span className={`tn-pcard-hashes${filled === 4 ? ' tn-pcard-hashes--full' : ''}`}>
+                                {filled === 4 && <IconCheck size={11} />}
+                                {filled}/4 хешей
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+
+            <button
+              className="tn-pcard-add"
+              onClick={() => setAddSubOpen(true)}
+            >
+              <IconWorld size={20} />
+              Добавить подписку
+            </button>
           </div>
         )}
       </div>
 
       {addServerOpen && <AddServer onClose={() => setAddServerOpen(false)} onAdd={handleAdd} />}
+      {addSubOpen && (
+        <AddSubscriptionModal
+          onClose={() => setAddSubOpen(false)}
+          onAdded={async () => {
+            await loadSubscriptions();
+            setServers(serverStore.getAll());
+          }}
+        />
+      )}
       {editServer && (
         <EditServer
           server={editServer}

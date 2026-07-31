@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"math/rand"
 	"net"
 	neturl "net/url"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -27,9 +30,103 @@ type VKCredentials struct {
 	ClientSecret string
 }
 
-var vkCredentialsList = []VKCredentials{
-	{ClientID: "6287487", ClientSecret: "MuAxFaKDYDOICzGnEOhp"},
-	{ClientID: "8202606", ClientSecret: "lMRsTiMCyPnp5vfoldmn"},
+var vkCredentialsList = loadVKCredentials()
+
+// loadVKCredentials loads credentials from WDTT_VK_CREDENTIALS env first,
+// then falls back to embedded pairs. This allows updating credentials without
+// rebuilding the binary.
+func loadVKCredentials() []VKCredentials {
+	if env := os.Getenv("WDTT_VK_CREDENTIALS"); env != "" {
+		creds, err := parseVKCredentialsEnv(env)
+		if err != nil {
+			log.Printf("[VK Auth] WDTT_VK_CREDENTIALS parse error: %v; using fallback", err)
+		} else if len(creds) > 0 {
+			log.Printf("[VK Auth] Loaded %d VK credential set(s) from environment", len(creds))
+			return creds
+		}
+	}
+	log.Printf("[VK Auth] WARNING: using embedded VK credentials.")
+	return []VKCredentials{
+		{ClientID: "6287487", ClientSecret: "MuAxFaKDYDOICzGnEOhp"},
+		{ClientID: "8202606", ClientSecret: "lMRsTiMCyPnp5vfoldmn"},
+	}
+}
+
+func parseVKCredentialsEnv(env string) ([]VKCredentials, error) {
+	var out []VKCredentials
+	for _, pair := range strings.Split(env, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		parts := strings.SplitN(pair, ":", 2)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("invalid credential pair %q (expected id:secret)", pair)
+		}
+		id, secret := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+		if id == "" || secret == "" {
+			return nil, fmt.Errorf("empty id or secret in pair %q", pair)
+		}
+		out = append(out, VKCredentials{ClientID: id, ClientSecret: secret})
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no credentials found")
+	}
+	return out, nil
+}
+
+// CallUnavailableError indicates a non-retryable VK call error (951/954/9xxx).
+type CallUnavailableError struct {
+	Code    int
+	Message string
+}
+
+func (e *CallUnavailableError) Error() string {
+	if e == nil {
+		return "VK call is unavailable"
+	}
+	if e.Message != "" {
+		return fmt.Sprintf("VK returns error: %s (error_code=%d)", e.Message, e.Code)
+	}
+	return fmt.Sprintf("VK call is unavailable (error_code=%d)", e.Code)
+}
+
+func asCallUnavailableError(err error) (*CallUnavailableError, bool) {
+	var callErr *CallUnavailableError
+	if errors.As(err, &callErr) {
+		return callErr, true
+	}
+	return nil, false
+}
+
+func fatalCallError(resp map[string]interface{}) *CallUnavailableError {
+	errObj, ok := resp["error"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	code := vkErrorCode(errObj["error_code"])
+	switch {
+	case code == 951, code == 954:
+	case code >= 9000 && code <= 9999:
+	default:
+		return nil
+	}
+	msg, _ := errObj["error_msg"].(string)
+	return &CallUnavailableError{Code: code, Message: msg}
+}
+
+func vkErrorCode(raw interface{}) int {
+	switch v := raw.(type) {
+	case float64:
+		return int(v)
+	case int:
+		return v
+	case string:
+		n, _ := strconv.Atoi(v)
+		return n
+	default:
+		return 0
+	}
 }
 
 // Full list of known credentials to match against when setting active client IDs
@@ -277,12 +374,20 @@ func fetchVkCreds(ctx context.Context, link string, streamID int) (string, strin
 		return "", "", nil, fmt.Errorf("CAPTCHA_WAIT_REQUIRED: global lockout active")
 	}
 
-	// Try VKCalls path first (api.vk.me, usually no captcha)
-	if user, pass, addrs, err := getVKCredsViaVKCallsPath(ctx, link, streamID); err == nil {
-		log.Printf("[STREAM %d] [VK Auth] Success via VKCalls path", streamID)
-		return user, pass, addrs, nil
+	// Try VKCalls path first (api.vk.me, usually no captcha) unless legacy mode forced.
+	if GetVkAuthMode() != "legacy" {
+		if user, pass, addrs, err := getVKCredsViaVKCallsPath(ctx, link, streamID); err == nil {
+			log.Printf("[STREAM %d] [VK Auth] Success via VKCalls path", streamID)
+			return user, pass, addrs, nil
+		} else {
+			if callErr, ok := asCallUnavailableError(err); ok {
+				log.Printf("[STREAM %d] [VK Auth] VKCalls path returned non-retryable call error: %v", streamID, callErr)
+				return "", "", nil, callErr
+			}
+			log.Printf("[STREAM %d] [VK Auth] VKCalls failed (%s), falling back to legacy", streamID, describeVKCallsFailure(err))
+		}
 	} else {
-		log.Printf("[STREAM %d] [VK Auth] VKCalls failed (%s), falling back to legacy", streamID, describeVKCallsFailure(err))
+		log.Printf("[STREAM %d] [VK Auth] Legacy mode selected, skipping VK Calls path", streamID)
 	}
 
 	var lastErr error
@@ -301,6 +406,10 @@ func fetchVkCreds(ctx context.Context, link string, streamID int) (string, strin
 
 		lastErr = err
 		log.Printf("[STREAM %d] [VK Auth] Failed with client_id=%s: %v", streamID, creds.ClientID, err)
+
+		if callErr, ok := asCallUnavailableError(err); ok {
+			return "", "", nil, callErr
+		}
 
 		if strings.Contains(err.Error(), "CAPTCHA_WAIT_REQUIRED") || strings.Contains(err.Error(), "FATAL_CAPTCHA") {
 			return "", "", nil, err
@@ -407,9 +516,12 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 
 	// Step 2: getCallPreview (mimics real VK client behavior)
 	data = fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&fields=photo_200&access_token=%s", link, token1)
-	_, err = doRequest(data, "https://api.vk.ru/method/calls.getCallPreview?v=5.275&client_id="+creds.ClientID)
+	resp, err = doRequest(data, "https://api.vk.ru/method/calls.getCallPreview?v=5.275&client_id="+creds.ClientID)
 	if err != nil {
 		log.Printf("[STREAM %d] [VK Auth] Warning: getCallPreview failed: %v", streamID, err)
+	} else if callErr := fatalCallError(resp); callErr != nil {
+		log.Printf("[STREAM %d] [VK Auth] getCallPreview returned non-retryable call error: %v", streamID, callErr)
+		return "", "", nil, callErr
 	}
 
 	vkDelayRandom(200, 400)
@@ -429,6 +541,11 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 		}
 
 		if errObj, hasErr := resp["error"].(map[string]interface{}); hasErr {
+			if callErr := fatalCallError(resp); callErr != nil {
+				log.Printf("[STREAM %d] [VK Auth] getAnonymousToken returned non-retryable call error: %v", streamID, callErr)
+				return "", "", nil, callErr
+			}
+
 			captchaErr := parseVkCaptchaError(errObj)
 			if captchaErr != nil && captchaErr.RedirectURI != "" && captchaErr.SessionToken != "" {
 				if attempt >= 3 {
@@ -718,44 +835,161 @@ func GetCreds(ctx context.Context, link string, streamID int) (string, string, [
 
 // ─── DNS dialer setup ───
 
+// publicDNSServers — fallback-резолверы на случай, когда системный DNS
+// молчит (перехват/фильтрация провайдером). Пробуются ТОЛЬКО если системный
+// сервер не ответил, и с реальной проверкой ответа (см. dnsServerResponds).
+var publicDNSServers = []string{
+	"77.88.8.8:53",      // Яндекс
+	"77.88.8.1:53",      // Яндекс резерв
+	"8.8.8.8:53",        // Google
+	"1.1.1.1:53",        // Cloudflare
+	"9.9.9.9:53",        // Quad9
+	"208.67.222.222:53", // OpenDNS
+}
+
+// dnsGoodMu/dnsGoodServer кэширует последний DNS-сервер, который реально ответил,
+// чтобы не перебирать весь список на каждый lookup.
+var (
+	dnsGoodMu     sync.Mutex
+	dnsGoodServer string
+)
+
+func cachedGoodDNS() string {
+	dnsGoodMu.Lock()
+	defer dnsGoodMu.Unlock()
+	return dnsGoodServer
+}
+
+func setCachedGoodDNS(server string) {
+	dnsGoodMu.Lock()
+	dnsGoodServer = server
+	dnsGoodMu.Unlock()
+}
+
+// setupGlobalResolver подменяет net.DefaultResolver так, чтобы на этапе
+// bootstrap (до поднятия туннеля) DNS резолвился надёжно.
+//
+// Порядок кандидатов: кэшированный рабочий DNS → системный DNS → публичные fallback.
+// Каждый сервер проверяется настоящим DNS-запросом с коротким дедлайном.
+// Сначала весь список по UDP, затем по TCP (UDP/53 может быть заблокирован).
 func setupGlobalResolver() {
 	dialer := &net.Dialer{
-		Timeout:   2 * time.Second,
+		Timeout:   3 * time.Second,
 		KeepAlive: 30 * time.Second,
-	}
-	dnsServers := []string{
-		"77.88.8.8:53",  // Яндекс
-		"77.88.8.1:53",  // Яндекс резерв
-		"8.8.8.8:53",    // Google
-		"1.1.1.1:53",    // Cloudflare
-		"9.9.9.9:53",    // Quad9
-		"208.67.222.222:53", // OpenDNS
 	}
 
 	net.DefaultResolver = &net.Resolver{
 		PreferGo: true,
 		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-			var lastErr error
-			for _, dns := range dnsServers {
-				conn, err := dialer.DialContext(ctx, "udp", dns)
-				if err == nil {
-					return conn, nil
+			candidates := make([]string, 0, len(publicDNSServers)+2)
+			seen := make(map[string]struct{})
+			add := func(s string) {
+				if s == "" {
+					return
 				}
-				conn, err = dialer.DialContext(ctx, "tcp", dns)
-				if err == nil {
-					return conn, nil
+				if _, ok := seen[s]; ok {
+					return
 				}
-				lastErr = err
+				seen[s] = struct{}{}
+				candidates = append(candidates, s)
 			}
-			if address != "" {
-				conn, err := dialer.DialContext(ctx, network, address)
-				if err == nil {
+
+			add(cachedGoodDNS())
+			add(address)
+			for _, s := range publicDNSServers {
+				add(s)
+			}
+
+			var lastErr error
+			// Пас 1 — UDP (основной транспорт DNS), пас 2 — TCP (fallback,
+			// если UDP/53 фильтруется).
+			for _, netw := range []string{"udp", "tcp"} {
+				for _, srv := range candidates {
+					if err := ctx.Err(); err != nil {
+						return nil, err
+					}
+					if !dnsServerResponds(ctx, dialer, netw, srv) {
+						lastErr = fmt.Errorf("DNS probe failed for %s/%s", netw, srv)
+						continue
+					}
+					conn, err := dialer.DialContext(ctx, netw, srv)
+					if err != nil {
+						lastErr = err
+						continue
+					}
+					setCachedGoodDNS(srv)
 					return conn, nil
 				}
-				lastErr = err
+			}
+
+			if lastErr == nil {
+				lastErr = fmt.Errorf("no DNS server responded (%d candidates)", len(candidates))
 			}
 			return nil, lastErr
 		},
 	}
+}
+
+// dnsServerResponds проверяет, что DNS-сервер по адресу server отвечает на
+// запросы по указанному транспорту (udp/tcp). Шлёт минимальный A-запрос для
+// api.vk.me и ждёт валидный ответ с коротким дедлайном. Для UDP создание
+// сокета само по себе ничего не значит, поэтому обязательна отправка пакета.
+func dnsServerResponds(ctx context.Context, dialer *net.Dialer, network, server string) bool {
+	const probeTimeout = 900 * time.Millisecond
+	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+
+	conn, err := dialer.DialContext(probeCtx, network, server)
+	if err != nil {
+		return false
+	}
+	defer conn.Close()
+
+	_ = conn.SetDeadline(time.Now().Add(probeTimeout))
+
+	query := buildDNSProbeQuery("api.vk.me")
+	if network == "tcp" {
+		// DNS over TCP: сообщение предваряется 2-байтовым префиксом длины.
+		framed := append([]byte{byte(len(query) >> 8), byte(len(query))}, query...)
+		if _, err := conn.Write(framed); err != nil {
+			return false
+		}
+	} else if _, err := conn.Write(query); err != nil {
+		return false
+	}
+
+	buf := make([]byte, 512)
+	n, err := conn.Read(buf)
+	if err != nil || n < 12 {
+		return false
+	}
+
+	// Проверяем, что это настоящий DNS-ответ: QR=1 и RCODE=0.
+	// Биты: [2] = QR(1) | OPCODE(4) | AA(1) | TC(1) | RD(1)
+	//       [3] = RA(1) | Z(3)      | RCODE(4)
+	return buf[2]&0x80 != 0 && buf[3]&0x0F == 0
+}
+
+// buildDNSProbeQuery собирает минимальный DNS-запрос типа A для указанного имени.
+func buildDNSProbeQuery(name string) []byte {
+	q := []byte{
+		0x12, 0x34, // ID
+		0x01, 0x00, // flags: RD=1
+		0x00, 0x01, // QDCOUNT=1
+		0x00, 0x00, // ANCOUNT
+		0x00, 0x00, // NSCOUNT
+		0x00, 0x00, // ARCOUNT
+	}
+	for _, label := range strings.Split(name, ".") {
+		if label == "" {
+			continue
+		}
+		q = append(q, byte(len(label)))
+		q = append(q, []byte(label)...)
+	}
+	q = append(q, 0x00)       // конец QNAME
+	q = append(q, 0x00, 0x01) // QTYPE = A
+	q = append(q, 0x00, 0x01) // QCLASS = IN
+	return q
 }
 

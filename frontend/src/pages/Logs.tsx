@@ -1,6 +1,7 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
-import { IconSearch, IconTrashX, IconCopy, IconTerminal2 } from '@tabler/icons-react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { IconSearch, IconTrashX, IconCopy, IconTerminal2, IconCheck, IconX } from '@tabler/icons-react';
 import { logStore, type LogEntry, type LogLevel } from '../lib/stores/logStore';
+import { pipelineStore, type PipelineState } from '../lib/stores/pipelineStore';
 
 type Filter = 'ALL' | 'MINI' | 'INFO' | 'ERROR';
 
@@ -73,6 +74,12 @@ function miniEntry(entry: LogEntry): LogEntry {
     const cleaned = msg.replace(/^\[СОСТОЯНИЕ\] /, '');
     return { ...entry, message: `[Состояние] ${cleaned}` };
   }
+  if (msg.startsWith('[СХЕМА]')) {
+    return { ...entry, message: msg };
+  }
+  if (kv === 'pipeline_error') {
+    return { ...entry, message: msg };
+  }
   // fallback
   const cleaned = msg.replace(/^\[CORE\] /, '').replace(/^\[STREAM \d+\] /, '');
   return { ...entry, message: `[${cleaned}]` };
@@ -82,11 +89,13 @@ export default function Logs() {
   const [filter, setFilter] = useState<Filter>('MINI');
   const [search, setSearch] = useState('');
   const [entries, setEntries] = useState<LogEntry[]>([]);
+  const [pipeline, setPipeline] = useState<PipelineState>({ visible: false, current: null, completed: [], failed: null, timedOut: false, timeoutSec: 0 });
   const bottomRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const autoScroll = useRef(true);
 
   useEffect(() => logStore.subscribe(setEntries), []);
+  useEffect(() => pipelineStore.subscribe(setPipeline), []);
 
   useEffect(() => {
     if (autoScroll.current && filter !== 'MINI') bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -159,6 +168,23 @@ export default function Logs() {
         .lg-mini-arrow { color: var(--accent); flex-shrink: 0; opacity: 0.5; }
         .lg-mini-msg { flex: 1; word-break: break-all; font-weight: 500; }
         .lg-mini-badge { flex-shrink: 0; background: rgba(66, 165, 245, 0.15); border-radius: 20px; padding: 1px 8px; font-size: 11px; color: #42A5F5; }
+        .lg-pipeline { flex-shrink: 0; background: var(--accent-soft); border-bottom: 1px solid var(--border-2); padding: 14px 18px; }
+        .lg-pipeline-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+        .lg-pipeline-title { font-size: 12px; font-weight: 600; color: var(--text); }
+        .lg-pipeline-detail { font-size: 11px; color: var(--accent); font-family: 'Geist Mono', monospace; }
+        .lg-pipeline-detail--failed { color: var(--danger); }
+        .lg-pipeline-row { display: flex; align-items: center; gap: 6px; }
+        .lg-pipeline-step { display: flex; flex-direction: column; align-items: center; gap: 4px; flex: 1; min-width: 0; }
+        .lg-pipeline-node { width: 22px; height: 22px; border-radius: 50%; display: flex; align-items: center; justify-content: center; border: 1.5px solid var(--border); background: var(--surface); color: var(--text-3); font-size: 10px; }
+        .lg-pipeline-node--done { background: rgba(76, 175, 80, 0.15); border-color: #4CAF50; color: #4CAF50; }
+        .lg-pipeline-node--current { background: rgba(66, 165, 245, 0.15); border-color: var(--accent); color: var(--accent); }
+        .lg-pipeline-node--failed { background: rgba(239, 68, 68, 0.15); border-color: var(--danger); color: var(--danger); }
+        .lg-pipeline-label { font-size: 9px; color: var(--text-3); font-family: 'Geist Mono', monospace; }
+        .lg-pipeline-label--done { color: #4CAF50; }
+        .lg-pipeline-label--current { color: var(--accent); font-weight: 600; }
+        .lg-pipeline-label--failed { color: var(--danger); }
+        .lg-pipeline-line { flex: 1; height: 2px; background: var(--border); min-width: 8px; }
+        .lg-pipeline-line--done { background: #4CAF50; }
       `}</style>
 
       <div className="lg-wrap">
@@ -168,6 +194,40 @@ export default function Logs() {
         </div>
 
         <div className="lg-card">
+          <div className="lg-pipeline">
+              <div className="lg-pipeline-head">
+                <span className="lg-pipeline-title">Схема подключения</span>
+                <span className={`lg-pipeline-detail${pipeline.failed ? ' lg-pipeline-detail--failed' : ''}`}>
+                  {pipeline.visible ? pipelineStore.currentDetail(pipeline) : 'Ожидание…'}
+                </span>
+              </div>
+              <div className="lg-pipeline-row">
+                {(() => {
+                  const steps = pipelineStore.getStepsToShow(pipeline);
+                  return steps.map((step, idx) => {
+                const isDone = pipeline.completed.includes(step) || pipeline.current === 'done';
+                const isCurrent = pipeline.visible && pipeline.current === step;
+                const isFailed = pipeline.failed === step;
+                    const showLine = idx < steps.length - 1;
+                    const nextDone = steps[idx + 1] ? (pipeline.completed.includes(steps[idx + 1]) || pipeline.current === 'done' || (pipeline.current && pipelineStore.stepOrder(pipeline.current) > pipelineStore.stepOrder(steps[idx + 1]))) : false;
+                    return (
+                      <React.Fragment key={step}>
+                        <div className="lg-pipeline-step">
+                          <div className={`lg-pipeline-node${isFailed ? ' lg-pipeline-node--failed' : isDone ? ' lg-pipeline-node--done' : isCurrent ? ' lg-pipeline-node--current' : ''}`}>
+                            {isDone ? <IconCheck size={12} stroke={3} /> : isFailed ? <IconX size={12} stroke={3} /> : null}
+                          </div>
+                          <span className={`lg-pipeline-label${isFailed ? ' lg-pipeline-label--failed' : isDone ? ' lg-pipeline-label--done' : isCurrent ? ' lg-pipeline-label--current' : ''}`}>
+                            {pipelineStore.stepLabel(step)}
+                          </span>
+                        </div>
+                        {showLine && <div className={`lg-pipeline-line${isDone && nextDone ? ' lg-pipeline-line--done' : ''}`} />}
+                      </React.Fragment>
+                    );
+                  });
+                })()}
+              </div>
+            </div>
+
           <div className="lg-toolbar">
             <div className="lg-search-wrap">
               <input

@@ -21,6 +21,8 @@ function normalizeServer(s: Server): Server {
     hashes: [h[0] ?? '', h[1] ?? '', h[2] ?? '', h[3] ?? ''],
     useGlobalHashes: s.useGlobalHashes ?? true,
     power: typeof s.power === 'number' && s.power > 0 ? s.power : 9,
+    subscriptionId: s.subscriptionId || undefined,
+    port: typeof s.port === 'number' ? s.port : undefined,
   };
 }
 

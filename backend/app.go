@@ -2,13 +2,11 @@ package backend
 
 import (
 	"context"
-	"encoding/json"
-	"io"
-	"log"
 	"net"
-	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	stdruntime "runtime"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -17,11 +15,15 @@ import (
 	"wg-turn-client/core"
 )
 
+// killOldInstances removed to reduce VirusTotal behavior alerts.
+// See process_windows.go for history.
+
 const appVersion = "2.1.3"
 
 // App — Wails App, связующее звено между UI и Orchestrator.
 type App struct {
 	ctx         context.Context
+	store       *Store
 	orch        *Orchestrator
 	trayEnabled atomic.Bool
 	trayIcon    []byte
@@ -30,7 +32,10 @@ type App struct {
 }
 
 func NewApp(trayIcon []byte) *App {
-	a := &App{trayIcon: trayIcon}
+	a := &App{
+		trayIcon: trayIcon,
+		store:    NewStore(),
+	}
 	a.closeAction.Store("ask")
 	return a
 }
@@ -39,16 +44,20 @@ func NewApp(trayIcon []byte) *App {
 // и регистрируем трей (если включён).
 func (a *App) Startup(ctx context.Context) {
 	a.ctx = ctx
-	// Убиваем старые wdtt.exe (кроме текущего) чтобы избежать конфликта за порт 9000.
-	if n := killOldInstances(); n > 0 {
-		log.Printf("[WDTT] Завершено %d предыдущих экземпляров", n)
-		// Даём ОС закрыть UDP-сокеты
-		time.Sleep(500 * time.Millisecond)
-	}
-	a.InitVkAuthMode()
+	a.restoreSettings()
 	a.orch = NewOrchestrator(ctx, a.onTrayUpdate)
 	a.startTrayIfNeeded()
 	go a.checkUpdateBackground()
+}
+
+// restoreSettings loads persisted settings and applies them to core / UI state.
+func (a *App) restoreSettings() {
+	st := a.store.GetSettings()
+	a.closeAction.Store(st.CloseAction)
+	core.SetVkAuthMode(st.VkAuthMode)
+	if st.AutoStart {
+		_ = SetAutoStart(true)
+	}
 }
 
 // onTrayUpdate вызывается Orchestrator при обновлении статистики.
@@ -98,6 +107,10 @@ func (a *App) OnBeforeClose(ctx context.Context) bool {
 func (a *App) SetCloseAction(action string, remember bool) {
 	if remember {
 		a.closeAction.Store(action)
+		_ = a.store.UpdateSettings(func(st AppSettings) AppSettings {
+			st.CloseAction = action
+			return st
+		})
 	}
 	switch action {
 	case "hide":
@@ -120,6 +133,58 @@ func (a *App) SetCloseActionPreference(action string) {
 	if action == "hide" || action == "exit" || action == "ask" {
 		a.closeAction.Store(action)
 	}
+}
+
+// GetSettings returns persisted app settings to the frontend.
+func (a *App) GetSettings() AppSettings { return a.store.GetSettings() }
+
+// SaveSettings persists app settings from the frontend.
+func (a *App) SaveSettings(st AppSettings) error { return a.store.SaveSettings(st) }
+
+// ListSubscriptions returns all persisted subscriptions.
+func (a *App) ListSubscriptions() []Subscription { return a.store.ListSubscriptions() }
+
+// AddSubscription fetches and persists a new subscription.
+func (a *App) AddSubscription(url string) (Subscription, error) { return a.store.AddSubscription(url) }
+
+// UpdateSubscription re-fetches a subscription by id.
+func (a *App) UpdateSubscription(id string) (Subscription, error) { return a.store.UpdateSubscription(id) }
+
+// DeleteSubscription removes a subscription and its profiles.
+func (a *App) DeleteSubscription(id string) error { return a.store.DeleteSubscription(id) }
+
+// GetSubscriptionProfiles returns all profiles from subscription directories.
+func (a *App) GetSubscriptionProfiles() map[string]ProfileData { return a.store.GetSubscriptionProfiles() }
+
+// OpenSubscriptionFolder opens the subscription profiles folder in Explorer.
+func (a *App) OpenSubscriptionFolder(id string) error {
+	dir := filepath.Join(a.store.configDir, "subscriptions", id)
+	_ = os.MkdirAll(dir, 0755)
+	var cmd string
+	var args []string
+	switch stdruntime.GOOS {
+	case "windows":
+		cmd = "explorer"
+		args = []string{dir}
+	case "darwin":
+		cmd = "open"
+		args = []string{dir}
+	default:
+		cmd = "xdg-open"
+		args = []string{dir}
+	}
+	return exec.Command(cmd, args...).Start()
+}
+
+// SetAutoStartSetting enables/disables auto-start and persists the choice.
+func (a *App) SetAutoStartSetting(enabled bool) error {
+	if err := SetAutoStart(enabled); err != nil {
+		return err
+	}
+	return a.store.UpdateSettings(func(st AppSettings) AppSettings {
+		st.AutoStart = enabled
+		return st
+	})
 }
 
 // ─── Методы, вызываемые из JS (Wails binding) ───
@@ -148,33 +213,32 @@ func (a *App) SendCaptchaResult(token string) { a.orch.SendCaptchaResult(token) 
 // SendTurnCreds — передаёт TURN-креды от VK-аккаунта в ядро.
 func (a *App) SendTurnCreds(payload string) { a.orch.SendTurnCreds(payload) }
 
-func loadVkAuthMode() string {
-	raw, err := os.ReadFile(filepath.Join(configDir(), "vk_auth_mode"))
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(raw))
-}
-
-func saveVkAuthMode(mode string) {
-	_ = os.WriteFile(filepath.Join(configDir(), "vk_auth_mode"), []byte(strings.TrimSpace(mode)), 0644)
-}
-
 // GetVkAuthMode — текущий режим VK-авторизации.
 func (a *App) GetVkAuthMode() string { return core.GetVkAuthMode() }
 
 // SetVkAuthMode — установить режим VK-авторизации.
 func (a *App) SetVkAuthMode(mode string) string {
 	result := core.SetVkAuthMode(mode)
-	saveVkAuthMode(result)
+	_ = a.store.UpdateSettings(func(st AppSettings) AppSettings {
+		st.VkAuthMode = result
+		return st
+	})
 	return result
 }
 
-// InitVkAuthMode — загружает сохранённый режим при старте.
-func (a *App) InitVkAuthMode() {
-	if m := loadVkAuthMode(); m != "" {
-		core.SetVkAuthMode(m)
-	}
+// GetObfsMode returns the current RTP masking mode (audio/video).
+func (a *App) GetObfsMode() string {
+	return a.store.GetSettings().ObfsMode
+}
+
+// SetObfsMode sets and persists the RTP masking mode.
+func (a *App) SetObfsMode(mode string) string {
+	mode = core.NormalizeObfsMode(mode)
+	_ = a.store.UpdateSettings(func(st AppSettings) AppSettings {
+		st.ObfsMode = mode
+		return st
+	})
+	return mode
 }
 
 // GetVkAuthStatus — статус авторизации VK (для UI).
@@ -257,51 +321,12 @@ func (a *App) CheckVPN() []string {
 
 // ─── Проверка обновлений ───
 
-type UpdateInfo struct {
-	Available bool   `json:"available"`
-	Version   string `json:"version"`
-	URL       string `json:"url"`
-}
-
 func (a *App) checkUpdateBackground() {
 	// Небольшая задержка, чтобы приложение успело запуститься
 	time.Sleep(3 * time.Second)
 	info := a.CheckUpdate()
 	if info.Available {
-		runtime.EventsEmit(a.ctx, "update_available", info.Version, info.URL)
-	}
-}
-
-// CheckUpdate проверяет GitHub releases на наличие новой версии.
-func (a *App) CheckUpdate() UpdateInfo {
-	client := &http.Client{Timeout: 10 * time.Second}
-	req, err := http.NewRequest("GET", "https://api.github.com/repos/IGOR7276/proxy-turn-vk-windows/releases/latest", nil)
-	if err != nil {
-		return UpdateInfo{}
-	}
-	req.Header.Set("Accept", "application/json")
-	resp, err := client.Do(req)
-	if err != nil {
-		return UpdateInfo{}
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return UpdateInfo{}
-	}
-	var release struct {
-		TagName string `json:"tag_name"`
-	}
-	if err := json.Unmarshal(body, &release); err != nil {
-		return UpdateInfo{}
-	}
-	if release.TagName == "" || release.TagName == "v"+appVersion {
-		return UpdateInfo{}
-	}
-	return UpdateInfo{
-		Available: true,
-		Version:   release.TagName,
-		URL:       "https://github.com/IGOR7276/proxy-turn-vk-windows/releases",
+		runtime.EventsEmit(a.ctx, "update_available", info.Version, info.URL, info.Body, info.AssetURL)
 	}
 }
 
@@ -309,40 +334,35 @@ func (a *App) CheckUpdate() UpdateInfo {
 
 // SaveProfile — сохранить профиль по имени.
 func (a *App) SaveProfile(name string, p ProfileData) error {
-	dir := filepath.Join(configDir(), "profiles")
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
-	data, err := json.Marshal(p)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(profilePath(name), data, 0600)
+	return a.store.SaveProfile(name, p)
 }
 
 // GetProfile — загрузить профиль.
 func (a *App) GetProfile(name string) (*ProfileData, error) {
-	return loadProfile(name)
+	return a.store.LoadProfile(name)
 }
 
 // DeleteProfile — удалить профиль.
 func (a *App) DeleteProfile(name string) error {
-	return os.Remove(profilePath(name))
+	return a.store.DeleteProfile(name)
 }
 
 // ListProfiles — список имён сохранённых профилей.
 func (a *App) ListProfiles() []string {
-	dir := filepath.Join(configDir(), "profiles")
-	entries, err := os.ReadDir(dir)
+	all, err := a.store.ListProfiles()
 	if err != nil {
 		return nil
 	}
-	var names []string
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".json") {
-			names = append(names, strings.TrimSuffix(e.Name(), ".json"))
-		}
+	names := make([]string, 0, len(all))
+	for name := range all {
+		names = append(names, name)
 	}
 	return names
+}
+
+// ListProfilesMap returns all profiles keyed by name (useful for the UI).
+func (a *App) ListProfilesMap() map[string]ProfileData {
+	all, _ := a.store.ListProfiles()
+	return all
 }
 

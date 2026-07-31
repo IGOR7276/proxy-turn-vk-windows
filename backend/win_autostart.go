@@ -10,7 +10,7 @@ import (
 
 const runKey = `Software\Microsoft\Windows\CurrentVersion\Run`
 
-func (a *App) SetAutoStart(v bool) error {
+func SetAutoStart(v bool) error {
 	k, err := registry.OpenKey(registry.CURRENT_USER, runKey, registry.SET_VALUE)
 	if err != nil {
 		return err
@@ -26,7 +26,7 @@ func (a *App) SetAutoStart(v bool) error {
 	return k.SetStringValue("WDTT", `"`+exe+`"`)
 }
 
-func (a *App) GetAutoStart() bool {
+func GetAutoStart() bool {
 	k, err := registry.OpenKey(registry.CURRENT_USER, runKey, registry.QUERY_VALUE)
 	if err != nil {
 		return false
@@ -34,5 +34,13 @@ func (a *App) GetAutoStart() bool {
 	defer k.Close()
 	_, _, err = k.GetStringValue("WDTT")
 	return err == nil
+}
+
+func (a *App) SetAutoStart(v bool) error {
+	return SetAutoStart(v)
+}
+
+func (a *App) GetAutoStart() bool {
+	return GetAutoStart()
 }
 

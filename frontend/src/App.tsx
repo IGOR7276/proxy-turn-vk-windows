@@ -14,6 +14,7 @@ import { wdttLinkStore, parseWdttUrl } from './lib/utils/wdttLink';
 import { toastStore } from './lib/stores/toastStore';
 import { logStore } from './lib/stores/logStore';
 import { tunnelStore } from './lib/stores/tunnelStore';
+import { pipelineStore } from './lib/stores/pipelineStore';
 import type { LogLevel } from './lib/stores/logStore';
 import { EventsOn } from '../wailsjs/runtime/runtime';
 import { settingsStore } from './lib/store';
@@ -50,10 +51,22 @@ function useWailsEvents() {
         const s = String(status ?? '');
         if (s === 'running') { tunnelStore.set('connected'); logStore.push('INFO', '✓ Туннель активен'); }
         else if (s === 'connecting') { tunnelStore.set('connecting'); logStore.push('INFO', '⟳ Подключение...'); }
-        else if (s === 'stopped' || s === 'error' || s === 'disconnected') { tunnelStore.set('idle'); logStore.push('INFO', '— Отключено'); }
+        else if (s === 'stopped' || s === 'error' || s === 'disconnected') { tunnelStore.set('idle'); logStore.push('INFO', '— Отключено'); pipelineStore.hide(); }
+      }),
+      EventsOn('pipeline_state', (payload: unknown) => {
+        const p = payload && typeof payload === 'object' ? payload : {};
+        pipelineStore.setFromBackend({
+          visible: Boolean((p as any).visible),
+          current: (p as any).current ?? null,
+          completed: Array.isArray((p as any).completed) ? (p as any).completed : [],
+          failed: (p as any).failed ?? null,
+          timedOut: Boolean((p as any).timedOut),
+          timeoutSec: Number((p as any).timeoutSec ?? 0),
+        });
       }),
       EventsOn('event', (name: unknown) => {
         if (name === 'wg_config') tunnelStore.set('connected');
+        if (name === 'pipeline_start') pipelineStore.reset();
       }),
       EventsOn('vk_auth_required', (hash: unknown) => {
         logStore.push('WARN', `Требуется вход через VK для хеша: ${String(hash ?? '')}`);
