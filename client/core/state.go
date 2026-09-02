@@ -47,9 +47,31 @@ func getCaptchaMode() string {
 // Хендлер должен вернуть success_token или ошибку.
 var WebViewCaptchaHandler func(mode, redirectURI, sessionToken string) (string, error)
 
-// EmitEvent — глобальный эмиттер событий, используется для captcha_required и т.п.
-// Устанавливается ядром при старте.
-var EmitEvent func(Event)
+// emitEventPtr — глобальный эмиттер событий (captcha_required, dtls_ok и т.п.).
+// Устанавливается ядром при старте через SetEmitEvent и сбрасывается при Stop.
+//
+// Хранится атомарно: раньше это была обычная переменная `EmitEvent`, и
+// паттерн `if EmitEvent != nil { EmitEvent(...) }` из воркер-горутин гонялся
+// с `EmitEvent = nil` в Core.Stop(). Между проверкой и вызовом переменная
+// успевала обнулиться → nil-func call → паника всего процесса. Теперь
+// указатель читается ровно один раз.
+var emitEventPtr atomic.Pointer[func(Event)]
+
+// SetEmitEvent устанавливает (или сбрасывает, если nil) глобальный эмиттер.
+func SetEmitEvent(f func(Event)) {
+	if f == nil {
+		emitEventPtr.Store(nil)
+		return
+	}
+	emitEventPtr.Store(&f)
+}
+
+// emitEvent безопасно вызывает текущий эмиттер (no-op, если он не задан).
+func emitEvent(ev Event) {
+	if p := emitEventPtr.Load(); p != nil {
+		(*p)(ev)
+	}
+}
 
 // drainCaptchaResult — выкидывает устаревший токен из канала, если там что-то есть.
 func drainCaptchaResult() {

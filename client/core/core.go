@@ -79,6 +79,13 @@ type Core struct {
 	wgCacheAt       time.Time
 	wgCacheKey      string
 
+	// eventsMu защищает закрытие c.events: emit() после close() = паника
+	// "send on closed channel". Раньше это могло случиться, когда ядро
+	// завершалось само (все воркеры вышли), а какая-нибудь горутина
+	// (VK creds / WebView / TURN payload) ещё дёргала глобальный эмиттер.
+	eventsMu     sync.RWMutex
+	eventsClosed bool
+
 	once sync.Once
 }
 
@@ -160,7 +167,7 @@ func (c *Core) Start(ctx context.Context) (<-chan Event, error) {
 	ctx = c.ctx
 
 	// Регистрируем глобальный эмиттер для captcha_required и т.п.
-	EmitEvent = c.emit
+	SetEmitEvent(c.emit)
 
 	peer, err := net.ResolveUDPAddr("udp", c.cfg.PeerAddr)
 	if err != nil {
@@ -409,7 +416,7 @@ func (c *Core) Start(ctx context.Context) (<-chan Event, error) {
 	}
 
 	go func() {
-		defer close(c.events)
+		defer c.closeEvents()
 		defer c.cancel()
 		defer func() { _ = localConn.Close() }()
 		defer disp.Shutdown()
@@ -430,7 +437,7 @@ func (c *Core) Stop() {
 		if c.cancel != nil {
 			c.cancel()
 		}
-		EmitEvent = nil
+		SetEmitEvent(nil)
 		WebViewCaptchaHandler = nil
 	})
 }
@@ -501,7 +508,23 @@ func (c *Core) Stats() Snapshot {
 	}
 }
 
+// closeEvents закрывает канал событий ровно один раз и блокирует дальнейшие emit.
+func (c *Core) closeEvents() {
+	c.eventsMu.Lock()
+	defer c.eventsMu.Unlock()
+	if c.eventsClosed {
+		return
+	}
+	c.eventsClosed = true
+	close(c.events)
+}
+
 func (c *Core) emit(ev Event) {
+	c.eventsMu.RLock()
+	defer c.eventsMu.RUnlock()
+	if c.eventsClosed {
+		return
+	}
 	select {
 	case c.events <- ev:
 	default:

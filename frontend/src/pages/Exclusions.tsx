@@ -82,7 +82,7 @@ export default function Exclusions() {
     }
   };
 
-  const tunnelRunning = tunnelState === 'connected' || tunnelState === 'connecting';
+  const tunnelRunning = tunnelState === 'connected' || tunnelState === 'connecting' || tunnelState === 'reconnecting';
 
   return (
     <>

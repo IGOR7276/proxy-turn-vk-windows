@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
@@ -180,6 +181,11 @@ type ConnectParams struct {
 
 	// ExcludeDomains — паттерны доменов для исключения из туннеля (wildcards поддерживаются).
 	ExcludeDomains []string `json:"excludeDomains,omitempty"`
+
+	// AutoReconnect — если ядро завершилось само (не по кнопке «Отключить»
+	// и не из-за фатальной ошибки авторизации), поднять сессию заново с
+	// экспоненциальной задержкой. Фронт передаёт значение из настроек.
+	AutoReconnect bool `json:"autoReconnect,omitempty"`
 }
 
 func loadProfile(name string) (*ProfileData, error) {
@@ -199,6 +205,13 @@ type coreSession struct {
 	c      *core.Core
 	doneCh <-chan core.Event // закрывается когда core завершился
 	done   chan struct{}    // закрывается когда forwardEvents полностью вышел (включая WG-teardown)
+
+	params      ConnectParams // для автопереподключения
+	isReconnect bool          // сессия поднята автопереподключением
+	userStop    atomic.Bool   // остановлена пользователем (Disconnect/выход)
+	fatal       atomic.Bool   // фатальная ошибка авторизации — не переподключаемся
+	wasUp       atomic.Bool   // туннель хотя бы раз дошёл до wg_up
+	upAt        atomic.Int64  // unix-время wg_up (для сброса backoff)
 }
 
 // connectionStep — этапы подключения, отслеживаемые pipeline.
@@ -229,15 +242,32 @@ type pipelineState struct {
 }
 
 // pipelineController следит за этапами подключения и останавливает туннель при ошибках/таймаутах.
+//
+// Важно: контроллер описывает ТОЛЬКО начальное подключение. После finish()
+// (wg_up) он становится инертным. Раньше любое событие dtls_error /
+// wrap_auth_timeout от любого воркера — в том числе при обычном
+// переподключении воркера после обрыва сети — вызывало markFailed → Stop()
+// и сносило работающий туннель целиком. Плюс каждый turn_allocated
+// повторно взводил 12-секундный таймер этапа DTLS.
 type pipelineController struct {
-	ctx       context.Context
-	cancel    context.CancelFunc
-	mu        sync.Mutex
-	state     pipelineState
-	sess      *coreSession
-	stopFunc  func()
-	timer     *time.Timer
+	ctx      context.Context
+	cancel   context.CancelFunc
+	mu       sync.Mutex
+	state    pipelineState
+	sess     *coreSession
+	stopFunc func()
+	timer    *time.Timer
+
+	done         bool // wg_up получен — этапы больше не отслеживаем
+	dtlsOK       bool // хотя бы один воркер прошёл DTLS
+	dtlsFailures int  // провалов DTLS до первого успеха
 }
+
+// dtlsFailuresBeforeFatal — сколько провалов DTLS-хендшейка (до первого
+// успешного) считаем признаком неверного пароля/недоступного сервера.
+// Один провал может быть транзиентным (потеря UDP), два подряд при
+// одновременных попытках нескольких воркеров — уже вряд ли.
+const dtlsFailuresBeforeFatal = 2
 
 func newPipelineController(stopFunc func()) *pipelineController {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -257,41 +287,63 @@ func (pc *pipelineController) emitState(appCtx context.Context) {
 	runtime.EventsEmit(appCtx, "pipeline_state", pc.state)
 }
 
+func (pc *pipelineController) isCompletedLocked(step connectionStep) bool {
+	for _, c := range pc.state.Completed {
+		if c == string(step) {
+			return true
+		}
+	}
+	return false
+}
+
+// setCurrent переводит схему на этап step. Этапы двигаются только вперёд:
+// повторные события от следующих воркеров (turn_allocated, dtls_ok…) не
+// откатывают схему назад и не перевзводят таймер.
 func (pc *pipelineController) setCurrent(appCtx context.Context, step connectionStep) {
 	pc.mu.Lock()
-	if pc.state.Failed != nil {
+	if pc.state.Failed != nil || pc.done || pc.isCompletedLocked(step) || pc.state.Current == step {
 		pc.mu.Unlock()
 		return
 	}
 	pc.state.Current = step
 	pc.state.TimedOut = false
+	pc.armTimeoutLocked(appCtx, step)
 	pc.mu.Unlock()
-	pc.armTimeout(appCtx, step)
 	pc.emitState(appCtx)
 }
 
 func (pc *pipelineController) markCompleted(appCtx context.Context, step connectionStep) {
 	pc.mu.Lock()
-	if pc.state.Failed != nil {
+	if pc.state.Failed != nil || pc.done || pc.isCompletedLocked(step) {
 		pc.mu.Unlock()
 		return
 	}
-	found := false
-	for _, c := range pc.state.Completed {
-		if c == string(step) {
-			found = true
-			break
-		}
-	}
-	if !found {
-		pc.state.Completed = append(pc.state.Completed, string(step))
-	}
+	pc.state.Completed = append(pc.state.Completed, string(step))
 	pc.mu.Unlock()
 	pc.emitState(appCtx)
 }
 
+// markFailed фиксирует ошибку начального подключения и останавливает сессию.
+// После finish() — no-op (кроме фатальной авторизации, см. markFatal).
 func (pc *pipelineController) markFailed(appCtx context.Context, step connectionStep, timedOut bool, timeoutSec int, reason string) {
 	pc.mu.Lock()
+	if pc.done {
+		pc.mu.Unlock()
+		return
+	}
+	pc.failLocked(appCtx, step, timedOut, timeoutSec, reason)
+}
+
+// markFatal — ошибка авторизации (неверный/истёкший пароль): останавливаем
+// даже работающий туннель, переподключаться бессмысленно.
+func (pc *pipelineController) markFatal(appCtx context.Context, reason string) {
+	pc.mu.Lock()
+	pc.failLocked(appCtx, stepDTLS, false, 0, reason)
+}
+
+// failLocked — общая часть markFailed/markFatal. Вызывается с захваченным pc.mu
+// и освобождает его сам.
+func (pc *pipelineController) failLocked(appCtx context.Context, step connectionStep, timedOut bool, timeoutSec int, reason string) {
 	if pc.state.Failed != nil {
 		pc.mu.Unlock()
 		return
@@ -301,26 +353,48 @@ func (pc *pipelineController) markFailed(appCtx context.Context, step connection
 	pc.state.TimedOut = timedOut
 	pc.state.TimeoutSec = timeoutSec
 	pc.state.Current = step
+	pc.stopTimerLocked()
 	pc.mu.Unlock()
-	if pc.timer != nil {
-		pc.timer.Stop()
-		pc.timer = nil
-	}
 	pc.emitState(appCtx)
 	runtime.EventsEmit(appCtx, "log", "ERROR", fmt.Sprintf("[СХЕМА] Ошибка на этапе %s: %s", step, reason))
 	go pc.stopFunc()
 }
 
+// onDTLSResult учитывает результат DTLS-хендшейка воркера. Возвращает true,
+// если провал нужно считать фатальным для начального подключения.
+func (pc *pipelineController) onDTLSResult(ok bool) (fatal bool) {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	if ok {
+		pc.dtlsOK = true
+		return false
+	}
+	if pc.done || pc.dtlsOK {
+		return false
+	}
+	pc.dtlsFailures++
+	return pc.dtlsFailures >= dtlsFailuresBeforeFatal
+}
+
 func (pc *pipelineController) finish(appCtx context.Context) {
 	pc.mu.Lock()
+	if pc.done {
+		pc.mu.Unlock()
+		return
+	}
+	pc.done = true
 	pc.state.Current = stepDone
 	pc.state.Completed = append(pc.state.Completed, string(stepDone))
+	pc.stopTimerLocked()
 	pc.mu.Unlock()
+	pc.emitState(appCtx)
+}
+
+func (pc *pipelineController) stopTimerLocked() {
 	if pc.timer != nil {
 		pc.timer.Stop()
 		pc.timer = nil
 	}
-	pc.emitState(appCtx)
 }
 
 func (pc *pipelineController) hide() {
@@ -329,18 +403,21 @@ func (pc *pipelineController) hide() {
 	pc.mu.Unlock()
 }
 
-func (pc *pipelineController) armTimeout(appCtx context.Context, step connectionStep) {
-	if pc.timer != nil {
-		pc.timer.Stop()
-		pc.timer = nil
-	}
+// armTimeoutLocked взводит таймер этапа. Вызывается с захваченным pc.mu.
+func (pc *pipelineController) armTimeoutLocked(appCtx context.Context, step connectionStep) {
+	pc.stopTimerLocked()
 	// Workers и captcha могут ждать пользователя; WG — зависит от системы.
 	if step == stepWorkers || step == stepCaptcha || step == stepWG {
 		return
 	}
 	timeout := 12 * time.Second
-	if step == stepVK {
+	switch step {
+	case stepVK:
 		timeout = 30 * time.Second
+	case stepTurn, stepDTLS:
+		// TURN allocate + DTLS через relay: 3 параллельных хендшейка по 20с
+		// плюс retry воркеров. 12с было мало на медленных/лоссовых каналах.
+		timeout = 40 * time.Second
 	}
 	pc.timer = time.AfterFunc(timeout, func() {
 		pc.markFailed(appCtx, step, true, int(timeout.Seconds()), "таймаут этапа")
@@ -349,10 +426,9 @@ func (pc *pipelineController) armTimeout(appCtx context.Context, step connection
 
 func (pc *pipelineController) close() {
 	pc.cancel()
-	if pc.timer != nil {
-		pc.timer.Stop()
-		pc.timer = nil
-	}
+	pc.mu.Lock()
+	pc.stopTimerLocked()
+	pc.mu.Unlock()
 }
 
 // Orchestrator — тонкий прокси между Wails UI и core.Core.
@@ -363,14 +439,36 @@ type Orchestrator struct {
 	prevLogWriter io.Writer
 	onTray        func(connected bool, rx, tx int64, workers int32)
 	pipeline      *pipelineController
+
+	// Автопереподключение.
+	reconnectTimer   *time.Timer
+	reconnectPending bool
+	reconnectAttempt int
 }
+
+// Параметры backoff автопереподключения.
+const (
+	reconnectMinDelay = 3 * time.Second
+	reconnectMaxDelay = 60 * time.Second
+	// Если туннель продержался дольше — считаем предыдущие попытки
+	// «успешными» и начинаем backoff заново.
+	reconnectStableAfter = 2 * time.Minute
+)
 
 func NewOrchestrator(ctx context.Context, onTray func(bool, int64, int64, int32)) *Orchestrator {
 	return &Orchestrator{appCtx: ctx, onTray: onTray}
 }
 
-// Start запускает сессию. Возвращает ошибку, если уже запущена.
+// Start запускает сессию по кнопке пользователя. Возвращает ошибку, если уже запущена.
 func (o *Orchestrator) Start(p ConnectParams) error {
+	o.cancelReconnect()
+	o.mu.Lock()
+	o.reconnectAttempt = 0
+	o.mu.Unlock()
+	return o.start(p, false)
+}
+
+func (o *Orchestrator) start(p ConnectParams, isReconnect bool) error {
 	o.mu.Lock()
 	if o.sess != nil {
 		o.mu.Unlock()
@@ -380,7 +478,7 @@ func (o *Orchestrator) Start(p ConnectParams) error {
 	o.sess = placeholder
 	o.mu.Unlock()
 
-	sess, err := o.launch(p)
+	sess, err := o.launch(p, isReconnect)
 	if err != nil {
 		o.mu.Lock()
 		if o.sess == placeholder {
@@ -396,7 +494,7 @@ func (o *Orchestrator) Start(p ConnectParams) error {
 	return nil
 }
 
-func (o *Orchestrator) launch(p ConnectParams) (*coreSession, error) {
+func (o *Orchestrator) launch(p ConnectParams, isReconnect bool) (*coreSession, error) {
 	// Перехватываем стандартный логгер → Wails события
 	if _, already := log.Writer().(*wailsLogWriter); !already {
 		o.prevLogWriter = log.Writer()
@@ -496,9 +594,11 @@ func (o *Orchestrator) launch(p ConnectParams) (*coreSession, error) {
 		return nil, fmt.Errorf("core start: %w", err)
 	}
 
-	sess := &coreSession{c: c, doneCh: events, done: make(chan struct{})}
+	sess := &coreSession{c: c, doneCh: events, done: make(chan struct{}), params: p, isReconnect: isReconnect}
 	o.mu.Lock()
-	o.pipeline = newPipelineController(func() { o.Stop() })
+	// Остановка по ошибке схемы — не «по кнопке»: для reconnect-сессий
+	// она приведёт к следующей попытке с backoff.
+	o.pipeline = newPipelineController(func() { o.stopSession(sess, false) })
 	o.mu.Unlock()
 	go o.forwardEvents(sess)
 	// Polling-цикл статистики для tray-иконки.
@@ -558,7 +658,15 @@ func (o *Orchestrator) forwardEvents(sess *coreSession) {
 				runtime.EventsEmit(o.appCtx, "vk_auth_required", ev.Data)
 			}
 			if ev.Name == "fatal_auth" {
+				sess.fatal.Store(true)
 				runtime.EventsEmit(o.appCtx, "error", ev.Data)
+			}
+			if ev.Name == "wg_up" {
+				sess.wasUp.Store(true)
+				sess.upAt.Store(time.Now().Unix())
+				if sess.isReconnect {
+					runtime.EventsEmit(o.appCtx, "log", "INFO", "[RECONNECT] Туннель восстановлен ✓")
+				}
 			}
 			runtime.EventsEmit(o.appCtx, "event", ev.Name, ev.Data)
 		}
@@ -590,7 +698,88 @@ func (o *Orchestrator) forwardEvents(sess *coreSession) {
 		o.pipeline = nil
 	}
 	o.mu.Unlock()
+
+	if o.scheduleReconnect(sess) {
+		return
+	}
 	runtime.EventsEmit(o.appCtx, "state_changed", "disconnected", "")
+}
+
+// scheduleReconnect решает, нужно ли поднимать сессию заново, и если да —
+// взводит таймер. Возвращает true, если переподключение запланировано.
+//
+// Переподключаемся, если:
+//   - включено в настройках (params.AutoReconnect);
+//   - сессию не останавливал пользователь;
+//   - не было фатальной ошибки авторизации;
+//   - туннель хотя бы раз был поднят ИЛИ это уже reconnect-сессия
+//     (иначе ошибка первого подключения показывается пользователю как раньше).
+func (o *Orchestrator) scheduleReconnect(sess *coreSession) bool {
+	if !sess.params.AutoReconnect || sess.userStop.Load() || sess.fatal.Load() {
+		return false
+	}
+	if !sess.wasUp.Load() && !sess.isReconnect {
+		return false
+	}
+
+	o.mu.Lock()
+	if sess.wasUp.Load() && time.Since(time.Unix(sess.upAt.Load(), 0)) > reconnectStableAfter {
+		o.reconnectAttempt = 0
+	}
+	attempt := o.reconnectAttempt
+	o.reconnectAttempt++
+	delay := reconnectMaxDelay
+	if attempt < 8 {
+		delay = reconnectMinDelay << uint(attempt)
+		if delay > reconnectMaxDelay {
+			delay = reconnectMaxDelay
+		}
+	}
+	o.reconnectPending = true
+	params := sess.params
+	o.reconnectTimer = time.AfterFunc(delay, func() { o.doReconnect(params) })
+	o.mu.Unlock()
+
+	runtime.EventsEmit(o.appCtx, "log", "WARN", fmt.Sprintf("[RECONNECT] Туннель упал, переподключение через %v (попытка %d)", delay, attempt+1))
+	runtime.EventsEmit(o.appCtx, "state_changed", "reconnecting", "")
+	return true
+}
+
+func (o *Orchestrator) doReconnect(params ConnectParams) {
+	o.mu.Lock()
+	if !o.reconnectPending {
+		o.mu.Unlock()
+		return
+	}
+	o.reconnectPending = false
+	o.reconnectTimer = nil
+	o.mu.Unlock()
+
+	runtime.EventsEmit(o.appCtx, "log", "INFO", "[RECONNECT] Переподключение...")
+	if err := o.start(params, true); err != nil {
+		runtime.EventsEmit(o.appCtx, "log", "ERROR", fmt.Sprintf("[RECONNECT] Не удалось запустить: %v", err))
+		// Поднять не удалось (порт занят, профиль пропал…) — планируем ещё раз.
+		fake := &coreSession{params: params, isReconnect: true}
+		if !o.scheduleReconnect(fake) {
+			runtime.EventsEmit(o.appCtx, "state_changed", "disconnected", "")
+		}
+	}
+}
+
+// cancelReconnect отменяет запланированное переподключение (если есть).
+// Возвращает true, если оно было запланировано.
+func (o *Orchestrator) cancelReconnect() bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if !o.reconnectPending {
+		return false
+	}
+	o.reconnectPending = false
+	if o.reconnectTimer != nil {
+		o.reconnectTimer.Stop()
+		o.reconnectTimer = nil
+	}
+	return true
 }
 
 func (o *Orchestrator) handlePipelineEvent(ev core.Event) {
@@ -615,6 +804,7 @@ func (o *Orchestrator) handlePipelineEvent(ev core.Event) {
 		pc.markCompleted(o.appCtx, stepTurn)
 		pc.setCurrent(o.appCtx, stepDTLS)
 	case "dtls_ok":
+		pc.onDTLSResult(true)
 		pc.markCompleted(o.appCtx, stepDTLS)
 		pc.setCurrent(o.appCtx, stepWorkers)
 	case "worker_ready":
@@ -623,16 +813,24 @@ func (o *Orchestrator) handlePipelineEvent(ev core.Event) {
 	case "wg_up":
 		pc.markCompleted(o.appCtx, stepWG)
 		pc.finish(o.appCtx)
-		case "wrap_auth_timeout":
-			reason := "WRAP/DTLS не подтверждён: неверный пароль, сервер недоступен или UDP режет оператор"
+	case "wrap_auth_timeout":
+		reason := "WRAP/DTLS не подтверждён: неверный пароль, сервер недоступен или UDP режет оператор"
+		if pc.onDTLSResult(false) {
 			runtime.EventsEmit(o.appCtx, "log", "ERROR", "[СХЕМА] Ошибка DTLS: "+reason)
 			pc.markFailed(o.appCtx, stepDTLS, false, 0, reason)
-		case "dtls_error":
+		} else {
+			runtime.EventsEmit(o.appCtx, "log", "WARN", "[DTLS] Таймаут хендшейка воркера, повторим ("+ev.Data+")")
+		}
+	case "dtls_error":
+		if pc.onDTLSResult(false) {
 			runtime.EventsEmit(o.appCtx, "log", "ERROR", "[СХЕМА] Ошибка DTLS: "+ev.Data)
 			pc.markFailed(o.appCtx, stepDTLS, false, 0, ev.Data)
-		case "fatal_auth":
-			runtime.EventsEmit(o.appCtx, "log", "ERROR", "[СХЕМА] Ошибка авторизации: "+ev.Data)
-			pc.markFailed(o.appCtx, stepDTLS, false, 0, ev.Data)
+		} else {
+			runtime.EventsEmit(o.appCtx, "log", "WARN", "[DTLS] Ошибка хендшейка воркера, повторим ("+ev.Data+")")
+		}
+	case "fatal_auth":
+		runtime.EventsEmit(o.appCtx, "log", "ERROR", "[СХЕМА] Ошибка авторизации: "+ev.Data)
+		pc.markFatal(o.appCtx, ev.Data)
 	}
 }
 
@@ -641,11 +839,28 @@ func (o *Orchestrator) handlePipelineEvent(ev core.Event) {
 // потому что o.sess обнуляется только в forwardEvents после WG-teardown,
 // а это занимает 5-15 секунд.
 func (o *Orchestrator) Stop() {
+	// Пользователь нажал «Отключить»: отменяем ожидающее переподключение.
+	if o.cancelReconnect() {
+		runtime.EventsEmit(o.appCtx, "log", "INFO", "[RECONNECT] Автопереподключение отменено")
+		runtime.EventsEmit(o.appCtx, "state_changed", "disconnected", "")
+	}
 	o.mu.Lock()
 	sess := o.sess
 	o.mu.Unlock()
 	if sess == nil || sess.c == nil {
 		return
+	}
+	o.stopSession(sess, true)
+}
+
+// stopSession останавливает конкретную сессию. userInitiated=true помечает
+// её как остановленную пользователем (автопереподключения не будет).
+func (o *Orchestrator) stopSession(sess *coreSession, userInitiated bool) {
+	if sess == nil || sess.c == nil {
+		return
+	}
+	if userInitiated {
+		sess.userStop.Store(true)
 	}
 	sess.c.Stop()
 	if sess.done != nil {
@@ -702,9 +917,10 @@ func (o *Orchestrator) Resume() {
 	sess.c.Resume()
 }
 
+// IsRunning — есть ли активная сессия или ожидающее автопереподключение.
 func (o *Orchestrator) IsRunning() bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	return o.sess != nil && o.sess.c != nil
+	return (o.sess != nil && o.sess.c != nil) || o.reconnectPending
 }
 

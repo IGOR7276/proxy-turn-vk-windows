@@ -107,17 +107,10 @@ func WorkerGroup(
 	}
 
 	// Регистрируем TURN IP-адреса для исключения из WG-маршрутизации
-	for _, url := range creds.TurnURLs {
-		host, _, err := net.SplitHostPort(strings.TrimPrefix(url, "turn://"))
-		if err == nil && host != "" {
-			AddTurnExcludeIP(host)
-		}
-	}
+	registerTurnExcludes(creds.TurnURLs)
 
 	log.Printf("[ГРУППА #%d] Креды OK, TURN: %v, %d воркеров", groupID, creds.TurnURLs, len(workerIDs))
-	if EmitEvent != nil {
-		EmitEvent(Event{Type: EventEvent, Name: "vk_creds_ok", Data: fmt.Sprintf("group=%d urls=%d", groupID, len(creds.TurnURLs))})
-	}
+			emitEvent(Event{Type: EventEvent, Name: "vk_creds_ok", Data: fmt.Sprintf("group=%d urls=%d", groupID, len(creds.TurnURLs))})
 
 	var configRequestInFlight int32
 	var wg sync.WaitGroup
@@ -153,6 +146,9 @@ func WorkerGroup(
 		creds = &Credentials{User: u, Pass: p, TurnURLs: urls, CacheStreamID: credStreamID}
 		credsMu.Unlock()
 		lastCredRefresh.Store(time.Now().Unix())
+		// Новые креды могут прийти с другими TURN-серверами — их тоже нужно
+		// вывести из-под WG-маршрута, иначе трафик воркера зациклится в туннеле.
+		registerTurnExcludes(urls)
 		log.Printf("[TURN] Креды обновлены после %s, TURN urls=%d", reason, len(urls))
 		return true
 	}
@@ -210,15 +206,29 @@ func WorkerGroup(
 				credsSnapshot.TurnURLs = cloneStringSlice(creds.TurnURLs)
 				credsMu.RUnlock()
 
-				configDelivered, sessErr := RunSession(ctx, tp, peer, d, localPort,
-					getConf, cc, wid, &credsSnapshot, deviceID, password, stats)
-
+				// Результат GETCONF приходит колбэком сразу после попытки, а не
+				// после смерти сессии — иначе неудачный запрос блокировал бы
+				// конфиг на всё время жизни сессии.
+				var onConfigAttempt func(bool)
 				if getConf {
-					if configDelivered {
-						atomic.StoreInt32(&configSent, 1)
-					} else {
-						atomic.StoreInt32(&configRequestInFlight, 0)
+					onConfigAttempt = func(delivered bool) {
+						if delivered {
+							atomic.StoreInt32(&configSent, 1)
+						} else {
+							atomic.StoreInt32(&configRequestInFlight, 0)
+						}
 					}
+				}
+
+				sessStart := time.Now()
+				_, sessErr := RunSession(ctx, tp, peer, d, localPort,
+					getConf, cc, wid, &credsSnapshot, deviceID, password, stats, onConfigAttempt)
+
+				// Сессия прожила достаточно долго → это был не «неудачный
+				// коннект», а нормальная работа с последующим обрывом.
+				// Сбрасываем backoff, чтобы переподключение было быстрым.
+				if time.Since(sessStart) > 60*time.Second {
+					attempt = 0
 				}
 
 				if sessErr != nil {
@@ -263,14 +273,11 @@ func WorkerGroup(
 						log.Printf("[ВОРКЕР #%d] Ошибка (попытка %d): %s", wid, attempt, errStr)
 					}
 
-					// Если ошибка STUN (credentials invalid), воркер не сможет переподключиться. Завершаем.
-					isStunDeath := strings.Contains(errStrLower, "error 29") ||
-						strings.Contains(errStrLower, "cannot create socket")
-
-					if isStunDeath {
-						log.Printf("[ВОРКЕР #%d] Невосстановимая TURN/STUN ошибка, завершение: %s", wid, errStr)
-						return
-					}
+					// Раньше «error 29» / «cannot create socket» считались
+					// невосстановимыми и воркер выходил навсегда. На практике
+					// это временные состояния (сеть ещё не поднялась после сна,
+					// VK-флуд-контроль), после которых воркер должен вернуться.
+					// Оставляем воркер в retry-цикле с обычным backoff.
 				}
 
 				if ctx.Err() != nil {
@@ -279,8 +286,12 @@ func WorkerGroup(
 
 				// Exponential backoff с jitter — предотвращает thundering herd,
 				// когда у VK hiccup и все 9 воркеров ретраят одновременно.
-				// 1: 2-5s, 2: 4-7s, 3: 8-11s, 4: 16-19s, 5+: 30-33s.
-				base := 2 << uint(attempt-1)
+				// 0: 1-3s (сессия умерла после долгой работы — переподключаемся
+				// быстро), 1: 2-5s, 2: 4-7s, 3: 8-11s, 4: 16-19s, 5+: 30-33s.
+				base := 1
+				if attempt > 0 {
+					base = 2 << uint(attempt-1)
+				}
 				if base > 30 {
 					base = 30
 				}
@@ -296,6 +307,37 @@ func WorkerGroup(
 
 	wg.Wait()
 	log.Printf("[ГРУППА #%d] Все воркеры группы завершились.", groupID)
+}
+
+// turnURLHost извлекает хост из TURN URL вида "turn:1.2.3.4:443",
+// "turns:host:5349?transport=udp", "turn://…". Возвращает "" если не разобрать.
+func turnURLHost(u string) string {
+	u = strings.TrimSpace(u)
+	for _, prefix := range []string{"turns://", "turn://", "turns:", "turn:"} {
+		if strings.HasPrefix(strings.ToLower(u), prefix) {
+			u = u[len(prefix):]
+			break
+		}
+	}
+	if idx := strings.IndexAny(u, "?#"); idx >= 0 {
+		u = u[:idx]
+	}
+	if host, _, err := net.SplitHostPort(u); err == nil {
+		return host
+	}
+	return u
+}
+
+// registerTurnExcludes выводит хосты TURN-серверов из-под WG-маршрута.
+// Старая версия делала TrimPrefix("turn://") на URL вида "turn:IP:PORT" и
+// SplitHostPort всегда падал с «too many colons» — исключения не добавлялись
+// вообще, спасали только широкие VK CIDR.
+func registerTurnExcludes(urls []string) {
+	for _, u := range urls {
+		if host := turnURLHost(u); host != "" {
+			AddTurnExcludeIP(host)
+		}
+	}
 }
 
 // ParseHashes — парсит строку хешей

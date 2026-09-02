@@ -24,8 +24,23 @@ const (
 	readBufSize        = 1600
 	socketBufSize      = 625 * 1024
 	keepaliveByte      = 0xFF // DTLS-level keepalive marker
-	keepaliveInterval  = 15 * time.Second
+	keepaliveInterval  = 10 * time.Second
 	dtlsHandshakeTimeout = 20 * time.Second // медленный WG успеет договориться
+
+	// sessionDeadAfter — если за это время через DTLS не пришло НИ ОДНОГО
+	// пакета (ни данных, ни pong на keepalive), сессия считается мёртвой и
+	// закрывается, чтобы воркер переподключился (новый TURN allocate + DTLS).
+	//
+	// Без этого после обрыва сети / смены Wi-Fi / сна ноутбука сессия висела
+	// «живой» до sessionReadTimeout (30 минут): UDP-запись в никуда не
+	// возвращает ошибку, а TURN-аллокация после смены NAT-маппинга мертва.
+	// Диспетчер продолжал раскидывать пакеты по зомби-воркерам → туннель
+	// не работал, хотя UI показывал «подключено».
+	sessionDeadAfter = 45 * time.Second
+
+	// configRequestAttempts — сколько раз одна сессия пробует GETCONF, прежде
+	// чем отдать право запроса другому воркеру.
+	configRequestAttempts = 3
 )
 
 // Handshake semaphore: limit to 3 concurrent DTLS handshakes
@@ -66,8 +81,24 @@ func RunSession(
 	creds *Credentials,
 	deviceID, password string,
 	stats *Stats,
+	onConfigAttempt func(delivered bool),
 ) (bool, error) {
 	configDelivered := false
+	// Сообщаем группе результат запроса конфига ровно один раз — либо сразу
+	// после попытки, либо (если до попытки не дошло) при выходе из сессии.
+	// Раньше флаг «запрос в полёте» сбрасывался только после смерти сессии,
+	// т.е. неудачный GETCONF первого воркера блокировал получение конфига
+	// на всё время жизни этой сессии (до 30 минут) — туннель «висел» на
+	// этапе WG.
+	configReported := false
+	reportConfig := func() {
+		if configReported || !getConfig || onConfigAttempt == nil {
+			return
+		}
+		configReported = true
+		onConfigAttempt(configDelivered)
+	}
+	defer reportConfig()
 
 	if len(creds.TurnURLs) == 0 {
 		return false, fmt.Errorf("нет TURN URL в учетных данных")
@@ -179,9 +210,7 @@ func RunSession(
 	getStreamCache(creds.CacheStreamID).errorCount.Store(0)
 
 	log.Printf("[СЕССИЯ #%d] Relay: %s", sessionID, relay.LocalAddr())
-	if EmitEvent != nil {
-		EmitEvent(Event{Type: EventEvent, Name: "turn_allocated", Data: fmt.Sprintf("session=%d", sessionID)})
-	}
+			emitEvent(Event{Type: EventEvent, Name: "turn_allocated", Data: fmt.Sprintf("session=%d", sessionID)})
 
 	// Pipe для DTLS ↔ TURN relay
 	pipeA, pipeB := connutil.AsyncPacketPipe()
@@ -334,57 +363,62 @@ func RunSession(
 			errStr := strings.ToLower(err.Error())
 			if strings.Contains(errStr, "deadline") || strings.Contains(errStr, "timeout") {
 				log.Printf("[ВОРКЕР #%d] [DTLS] Таймаут хендшейка (15s) с WRAP, пароль/WRAP не подтверждён", sessionID)
-				if EmitEvent != nil {
-					EmitEvent(Event{Type: EventEvent, Name: "wrap_auth_timeout", Data: fmt.Sprintf("worker=%d", sessionID)})
-				}
+									emitEvent(Event{Type: EventEvent, Name: "wrap_auth_timeout", Data: fmt.Sprintf("worker=%d", sessionID)})
 				return false, fmt.Errorf("WRAP_AUTH_TIMEOUT: DTLS timeout, пароль/WRAP не подтверждён")
 			}
 		}
-		if EmitEvent != nil {
-			EmitEvent(Event{Type: EventEvent, Name: "dtls_error", Data: fmt.Sprintf("worker=%d error=%s", sessionID, err.Error())})
-		}
+					emitEvent(Event{Type: EventEvent, Name: "dtls_error", Data: fmt.Sprintf("worker=%d error=%s", sessionID, err.Error())})
 		return false, fmt.Errorf("DTLS хендшейк: %w", err)
 	}
 	log.Printf("[ВОРКЕР #%d] [DTLS] Соединение установлено ✓", sessionID)
-	if EmitEvent != nil {
-		EmitEvent(Event{Type: EventEvent, Name: "dtls_ok", Data: fmt.Sprintf("worker=%d", sessionID)})
-	}
+			emitEvent(Event{Type: EventEvent, Name: "dtls_ok", Data: fmt.Sprintf("worker=%d", sessionID)})
 
 	// Emit ready event once the first worker completes DTLS handshake.
-	if EmitEvent != nil {
-		EmitEvent(Event{Type: EventEvent, Name: "ready", Data: fmt.Sprintf("worker=%d", sessionID)})
-	}
+			emitEvent(Event{Type: EventEvent, Name: "ready", Data: fmt.Sprintf("worker=%d", sessionID)})
 
 	atomic.AddInt32(&stats.ActiveConnections, 1)
 	defer atomic.AddInt32(&stats.ActiveConnections, -1)
 
-	// Запрос конфига
+	// Запрос конфига (несколько попыток внутри одной сессии: потеря одного
+	// UDP-пакета не должна стоить нам целой сессии).
 	if getConfig && configCh != nil {
-		conf, confErr := RequestConfig(dtlsConn, localPort, deviceID, password)
-		if confErr != nil {
-			errStr := confErr.Error()
-			if strings.Contains(errStr, "FATAL_AUTH") {
-				return false, confErr
+		for attempt := 1; attempt <= configRequestAttempts; attempt++ {
+			conf, confErr := RequestConfig(dtlsConn, localPort, deviceID, password)
+			if confErr != nil {
+				errStr := confErr.Error()
+				if strings.Contains(errStr, "FATAL_AUTH") {
+					return false, confErr
+				}
+				log.Printf("[ВОРКЕР #%d] Ошибка конфига (попытка %d/%d): %v", sessionID, attempt, configRequestAttempts, confErr)
+			} else if conf != "" {
+				select {
+				case configCh <- conf:
+					configDelivered = true
+					log.Printf("[ВОРКЕР #%d] Конфиг получен", sessionID)
+				default:
+					configDelivered = true
+					log.Printf("[ВОРКЕР #%d] Конфиг уже был доставлен другим воркером", sessionID)
+				}
+				break
+			} else {
+				log.Printf("[ВОРКЕР #%d] Сервер ещё не выдал WireGuard-конфиг (попытка %d/%d)", sessionID, attempt, configRequestAttempts)
 			}
-			log.Printf("[ВОРКЕР #%d] Ошибка конфига: %v", sessionID, confErr)
-		} else if conf != "" {
-			select {
-			case configCh <- conf:
-				configDelivered = true
-				log.Printf("[ВОРКЕР #%d] Конфиг получен", sessionID)
-			default:
-				configDelivered = true
-				log.Printf("[ВОРКЕР #%d] Конфиг уже был доставлен другим воркером", sessionID)
+			if attempt < configRequestAttempts {
+				select {
+				case <-time.After(2 * time.Second):
+				case <-sessCtx.Done():
+					return false, sessCtx.Err()
+				}
 			}
-		} else {
-			log.Printf("[ВОРКЕР #%d] Сервер ещё не выдал WireGuard-конфиг, повторим позже", sessionID)
+		}
+		reportConfig()
+		if !configDelivered {
+			log.Printf("[ВОРКЕР #%d] Конфиг не получен, право запроса передано другим воркерам", sessionID)
 		}
 	}
 
 	log.Printf("[ВОРКЕР #%d] [READY] Туннель готов к работе ✓", sessionID)
-	if EmitEvent != nil {
-		EmitEvent(Event{Type: EventEvent, Name: "worker_ready", Data: fmt.Sprintf("worker=%d", sessionID)})
-	}
+			emitEvent(Event{Type: EventEvent, Name: "worker_ready", Data: fmt.Sprintf("worker=%d", sessionID)})
 
 	// Регистрация в диспетчере
 	slot := &WorkerSlot{
@@ -403,7 +437,14 @@ func RunSession(
 	})
 	defer stopDTLS()
 
-	// DTLS Keepalive: prevents TURN allocation timeout and DTLS idle disconnect
+	// lastRx — unix-nano последнего пакета, полученного через DTLS (данные
+	// или pong). Обновляется Reader'ом, проверяется keepalive-горутиной.
+	var lastRx atomic.Int64
+	lastRx.Store(time.Now().UnixNano())
+
+	// DTLS Keepalive + liveness: шлём ping, и если ответов (или любых других
+	// пакетов) нет дольше sessionDeadAfter — закрываем сессию. Воркер
+	// переподключится с новой TURN-аллокацией.
 	go func() {
 		defer proxyWg.Done()
 		t := time.NewTicker(keepaliveInterval)
@@ -414,6 +455,13 @@ func RunSession(
 			case <-sessCtx.Done():
 				return
 			case <-t.C:
+				silent := time.Since(time.Unix(0, lastRx.Load()))
+				if silent > sessionDeadAfter {
+					log.Printf("[ВОРКЕР #%d] Нет ответа от сервера %.0fs — сессия мертва, переподключаемся", sessionID, silent.Seconds())
+					emitEvent(Event{Type: EventEvent, Name: "session_dead", Data: fmt.Sprintf("worker=%d silent=%.0fs", sessionID, silent.Seconds())})
+					sessCancel()
+					return
+				}
 				_ = dtlsConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 				if _, err := dtlsConn.Write(ping); err != nil {
 					log.Printf("[ВОРКЕР #%d] Keepalive write failed: %v, closing session", sessionID, err)
@@ -466,6 +514,8 @@ func RunSession(
 				log.Printf("[ВОРКЕР #%d] Ошибка Reader: %v", sessionID, readErr)
 				return
 			}
+
+			lastRx.Store(time.Now().UnixNano())
 
 			// Skip keepalive pong from server
 			if n == 1 && pkt[0] == keepaliveByte {

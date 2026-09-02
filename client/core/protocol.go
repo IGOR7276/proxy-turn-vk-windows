@@ -18,13 +18,27 @@ func RequestConfig(conn net.Conn, localPort, deviceID, password string) (string,
 	if err := conn.SetReadDeadline(time.Now().Add(8 * time.Second)); err != nil {
 		return "", fmt.Errorf("установка дедлайна: %w", err)
 	}
-	n, err := conn.Read(b)
+	var (
+		n    int
+		err  error
+		resp string
+	)
+	// Пропускаем keepalive-pong (одиночный 0xFF), если он пришёл раньше ответа.
+	for {
+		n, err = conn.Read(b)
+		if err != nil {
+			break
+		}
+		if n == 1 && b[0] == keepaliveByte {
+			continue
+		}
+		resp = string(b[:n])
+		break
+	}
 	_ = conn.SetReadDeadline(time.Time{})
 	if err != nil {
 		return "", fmt.Errorf("чтение ответа конфига: %w", err)
 	}
-
-	resp := string(b[:n])
 	if resp == "NOCONF" {
 		return "", nil
 	}
@@ -42,9 +56,7 @@ func RequestConfig(conn net.Conn, localPort, deviceID, password string) (string,
 		default:
 			authErr = fmt.Errorf("FATAL_AUTH: доступ запрещён (%s)", reason)
 		}
-		if EmitEvent != nil {
-			EmitEvent(Event{Type: EventEvent, Name: "fatal_auth", Data: authErr.Error()})
-		}
+					emitEvent(Event{Type: EventEvent, Name: "fatal_auth", Data: authErr.Error()})
 		return "", authErr
 	}
 

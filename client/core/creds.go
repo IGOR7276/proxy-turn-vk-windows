@@ -792,13 +792,11 @@ func requestWebViewCaptcha(streamID int, captchaErr *VkCaptchaError, mode string
 	fmt.Printf("CAPTCHA_SOLVE|%s|%s|%s\n", mode, captchaErr.RedirectURI, captchaErr.SessionToken)
 
 	// Emit captcha_required для внешнего решателя (frontend/Android)
-	if EmitEvent != nil {
-		EmitEvent(Event{
+			emitEvent(Event{
 			Type: EventEvent,
 			Name: "captcha_required",
 			Data: fmt.Sprintf("%s|%s|%s", mode, captchaErr.RedirectURI, captchaErr.SessionToken),
 		})
-	}
 
 	waitCtx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
