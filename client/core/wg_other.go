@@ -3,6 +3,8 @@
 
 package core
 
+import "net"
+
 func SetupWindowsWireGuard(rawConf, ifaceName string, customDNS []string, excludeDomains []string) error {
 	return nil
 }
@@ -19,3 +21,6 @@ func runRouteAdd(cidr, gateway string) bool {
 
 func runRouteDelete(cidr string) {}
 
+
+// applyTurnHostRoute — no-op на не-Windows платформах.
+func applyTurnHostRoute(ip net.IP) {}

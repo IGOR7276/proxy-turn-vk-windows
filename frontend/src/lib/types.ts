@@ -41,9 +41,10 @@ export interface AppSettings {
 
   closeAction: CloseAction;     // действие при нажатии X (default 'ask' = показать диалог)
   obfsMode: ObfsMode;           // режим маскировки RTP: audio (OPUS/PT111) или video (H264/PT96)
+  autoReconnect: boolean;       // автоматически переподключаться после обрыва (default true)
 }
 
-export type TunnelState = 'idle' | 'connecting' | 'connected' | 'disconnecting';
+export type TunnelState = 'idle' | 'connecting' | 'reconnecting' | 'connected' | 'disconnecting';
 
 export interface Subscription {
   id: string;
@@ -96,6 +97,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   wgInterface: 'WDTT',
   closeAction: 'ask',
   obfsMode: 'audio',
+  autoReconnect: true,
 };
 
 export const DNS_PRESETS: Record<Exclude<DnsProvider, 'custom'>, { name: string; servers: string }> = {

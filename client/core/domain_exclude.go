@@ -142,6 +142,32 @@ func newDomainExcluder(patterns []string, gateway, iface string, dnsServers []st
 	}
 }
 
+// SetGateway переставляет все добавленные /32 маршруты на новый шлюз.
+// Вызывается route guard'ом при смене сети.
+func (de *domainExcluder) SetGateway(gateway, iface string) {
+	de.mu.Lock()
+	defer de.mu.Unlock()
+	if de.gateway == gateway && de.iface == iface {
+		return
+	}
+	de.gateway, de.iface = gateway, iface
+	if gateway == "" {
+		return
+	}
+	moved := 0
+	for ipStr := range de.routeToPattern {
+		runRouteDelete(ipStr + "/32")
+		if runRouteAdd(ipStr+"/32", gateway) {
+			moved++
+		} else {
+			delete(de.routeToPattern, ipStr)
+		}
+	}
+	if moved > 0 {
+		log.Printf("[DOMEXCL] Маршруты переставлены на шлюз %s (%s): %d", gateway, iface, moved)
+	}
+}
+
 // Start запускает периодический refresh (каждые 5 минут) для точных доменов.
 // Wildcard-паттерны обрабатываются on-demand при DNS-запросах.
 func (de *domainExcluder) Start() {

@@ -110,7 +110,7 @@ export default function Info() {
             </span>
             <span className="if-value" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <span className={`if-status-dot ${running ? 'if-status-dot--on' : 'if-status-dot--off'}`} />
-              {running ? 'Активен' : tunnelState === 'connecting' ? 'Подключение' : 'Не запущен'}
+              {running ? 'Активен' : tunnelState === 'connecting' ? 'Подключение' : tunnelState === 'reconnecting' ? 'Переподключение' : 'Не запущен'}
             </span>
           </div>
           <div className="if-row">

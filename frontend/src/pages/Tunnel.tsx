@@ -37,6 +37,7 @@ import { resolveDnsUpstream } from '../lib/types';
 const TUNNEL_LABEL: Record<TunnelState, string> = {
   idle: 'Отключено',
   connecting: 'Подключение…',
+  reconnecting: 'Переподключение…',
   connected: 'Подключено',
   disconnecting: 'Отключение…',
 };
@@ -237,6 +238,7 @@ export default function Tunnel() {
         dnsUpstream: dnsUpstream.length > 0 ? dnsUpstream : undefined,
         wgInterface: s.wgInterface || 'WDTT',
         excludeDomains: excludeDomains.length > 0 ? excludeDomains : undefined,
+        autoReconnect: s.autoReconnect !== false,
       };
       if (cur.subscriptionId) {
         // For subscription profiles pass runtime data so the backend does not
@@ -269,7 +271,7 @@ export default function Tunnel() {
       }
       toastStore.show('Запускаю туннель', 2000);
       await doConnect();
-    } else if (tunnelStateRef.current === 'connected' || tunnelStateRef.current === 'connecting') {
+    } else if (tunnelStateRef.current === 'connected' || tunnelStateRef.current === 'connecting' || tunnelStateRef.current === 'reconnecting') {
       tunnelStore.set('disconnecting');
       try {
         await WailsDisconnect();
@@ -608,13 +610,13 @@ export default function Tunnel() {
             Секреты
           </button>
           <button
-            className={`tn-action ${tunnelState === 'connected' || tunnelState === 'connecting' ? 'tn-action--danger' : 'tn-action--filled'}`}
+            className={`tn-action ${tunnelState === 'connected' || tunnelState === 'connecting' || tunnelState === 'reconnecting' ? 'tn-action--danger' : 'tn-action--filled'}`}
             onClick={handleConnect}
           >
-            {tunnelState === 'connected' || tunnelState === 'connecting' ? (
+            {tunnelState === 'connected' || tunnelState === 'connecting' || tunnelState === 'reconnecting' ? (
               <>
                 <IconPlayerStopFilled size={18} />
-                {tunnelState === 'connected' ? 'Отключить' : 'Подключение…'}
+                {tunnelState === 'connected' ? 'Отключить' : TUNNEL_LABEL[tunnelState]}
               </>
             ) : (
               <>

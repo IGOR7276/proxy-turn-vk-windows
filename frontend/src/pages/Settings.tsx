@@ -63,7 +63,7 @@ export default function Settings() {
     }
   };
 
-  const locked = tunnelState === 'connected' || tunnelState === 'connecting';
+  const locked = tunnelState === 'connected' || tunnelState === 'connecting' || tunnelState === 'reconnecting';
 
   const update = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => {
     setSettings(s => {
@@ -294,6 +294,20 @@ export default function Settings() {
             <button
               className={`sp-toggle${settings.autoWG ? ' sp-toggle--on' : ''}`}
               onClick={() => update('autoWG', !settings.autoWG)}
+            />
+          </div>
+
+          <div className="sp-row">
+            <span className="sp-label">
+              <span className="sp-label-main">
+                <IconRotate size={16} />
+                Автопереподключение
+              </span>
+              <span className="sp-label-sub">поднимать туннель заново после обрыва</span>
+            </span>
+            <button
+              className={`sp-toggle${settings.autoReconnect !== false ? ' sp-toggle--on' : ''}`}
+              onClick={() => update('autoReconnect', settings.autoReconnect === false)}
             />
           </div>
 

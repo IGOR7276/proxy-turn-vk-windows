@@ -51,6 +51,7 @@ function useWailsEvents() {
         const s = String(status ?? '');
         if (s === 'running') { tunnelStore.set('connected'); logStore.push('INFO', '✓ Туннель активен'); }
         else if (s === 'connecting') { tunnelStore.set('connecting'); logStore.push('INFO', '⟳ Подключение...'); }
+        else if (s === 'reconnecting') { tunnelStore.set('reconnecting'); logStore.push('WARN', '⟳ Обрыв — переподключение...'); pipelineStore.hide(); }
         else if (s === 'stopped' || s === 'error' || s === 'disconnected') { tunnelStore.set('idle'); logStore.push('INFO', '— Отключено'); pipelineStore.hide(); }
       }),
       EventsOn('pipeline_state', (payload: unknown) => {

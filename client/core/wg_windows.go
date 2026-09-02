@@ -192,8 +192,13 @@ func SetupWindowsWireGuard(rawConf, ifaceName string, customDNS []string, exclud
 		}
 	}
 
-	// Запоминаем оригинальный шлюз ДО того, как WG перехватит маршрутизацию
-	origGateway, origIface := getDefaultGateway()
+	// Запоминаем оригинальный шлюз ДО того, как WG перехватит маршрутизацию.
+	// Сначала быстрый путь через GetAdaptersAddresses (без PowerShell), он же
+	// используется route guard'ом; PowerShell/route print — fallback.
+	origGateway, origIface := detectPhysicalGateway(actualName)
+	if origGateway == "" || origIface == "" {
+		origGateway, origIface = getDefaultGateway()
+	}
 	if origGateway == "" && origIface != "" {
 		origGateway = getInterfaceGateway(origIface)
 	}
@@ -213,15 +218,20 @@ func SetupWindowsWireGuard(rawConf, ifaceName string, customDNS []string, exclud
 
 	// TURN-исключения: добавляем /32 маршруты на TURN-сервера через оригинальный шлюз.
 	// Это критично — без них WG-default route 0.0.0.0/0 перехватит трафик к TURN,
-	// и туннель упадёт в первую же секунду.
+	// и туннель упадёт в первую же секунду. Состояние живёт в wgRuntime, чтобы
+	// route guard мог переставить маршруты при смене сети, а AddTurnExcludeIP —
+	// добавить новые TURN IP на лету.
+	rt := &wgRuntime{
+		ifaceName:   actualName,
+		gateway:     origGateway,
+		iface:       origIface,
+		turnRoutes:  make(map[string]bool),
+		dnsOverride: len(customDNS) > 0,
+	}
 	if origGateway != "" && origIface != "" {
-		for _, ip := range getTurnExcludeIPs() {
-			if err := addHostRoute(origIface, origGateway, ip.String()); err != nil {
-				log.Printf("[WG] Не удалось добавить TURN-исключение %s: %v", ip, err)
-			}
-		}
+		rt.applyTurnRoutes()
 	} else {
-		log.Printf("[WG] ⚠ TURN-исключения НЕ добавлены — туннель может быть нестабильным")
+		log.Printf("[WG] ⚠ TURN-исключения НЕ добавлены — туннель может быть нестабильным (route guard добавит их, когда появится шлюз)")
 	}
 
 	// VK CIDR + DNS-исключения: используем route add (более простой, чем netsh).
@@ -280,6 +290,9 @@ func SetupWindowsWireGuard(rawConf, ifaceName string, customDNS []string, exclud
 		wgTeardownMu.Unlock()
 
 		log.Printf("[WG] Teardown интерфейса %s...", actualName)
+		// Останавливаем route guard, чтобы он не переставлял маршруты
+		// параллельно с их удалением.
+		stopRouteGuard()
 		// Сначала останавливаем DNS-прокси и возвращаем оригинальный DNS,
 		// чтобы приложения не потеряли резолв после удаления туннеля.
 		dnsProxyMu.Lock()
@@ -309,6 +322,10 @@ func SetupWindowsWireGuard(rawConf, ifaceName string, customDNS []string, exclud
 		// Сначала убираем exclude-маршруты, чтобы вернуть трафик в норму,
 		// даже если удаление TUN/default route по какой-то причине отвалится.
 		removeExcludeRoutes()
+		rt.mu.Lock()
+		turnIface := rt.iface
+		rt.mu.Unlock()
+		rt.removeTurnRoutes(turnIface)
 		_ = runNetsh("interface", "ipv4", "delete", "route", "0.0.0.0/0", actualName, "0.0.0.0", "store=active")
 		_ = runNetsh("interface", "ipv4", "delete", "address", fmt.Sprintf("name=%s", actualName), fmt.Sprintf("address=%s", cfg.address), "store=active")
 		log.Printf("[WG] Teardown завершён")
@@ -361,15 +378,7 @@ func SetupWindowsWireGuard(rawConf, ifaceName string, customDNS []string, exclud
 				log.Printf("[DOMEXCL] Доменные исключения не активированы (gateway=%q, dns=%v)", origGateway, customDNS)
 			}
 
-			if origIface != "" {
-				orig := getInterfaceDNS(origIface)
-				originalDNSByIf[origIface] = orig
-				if err := setInterfaceDNS(origIface, []string{"127.0.0.1"}); err != nil {
-					log.Printf("[DNS] Не удалось подменить системный DNS на %s: %v", origIface, err)
-				} else {
-					log.Printf("[DNS] Системный DNS %s: %v → 127.0.0.1 (через локальный прокси)", origIface, orig)
-				}
-			}
+			overrideInterfaceDNS(origIface)
 			// Сбрасываем кэш, чтобы новые запросы пошли сразу через прокси.
 			_ = hiddenCmd("ipconfig", "/flushdns").Run()
 		}
@@ -379,6 +388,9 @@ func SetupWindowsWireGuard(rawConf, ifaceName string, customDNS []string, exclud
 		<-wgDev.Wait()
 		log.Printf("[WG] WireGuard устройство %s остановлено", actualName)
 	}()
+
+	// Мониторим смену физического шлюза/интерфейса и переставляем исключения.
+	startRouteGuard(rt)
 
 	return nil
 }

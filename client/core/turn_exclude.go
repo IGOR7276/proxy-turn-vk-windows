@@ -25,6 +25,9 @@ func AddTurnExcludeIP(ipStr string) {
 	}
 	turnExcludeIPs = append(turnExcludeIPs, ip)
 	log.Printf("[WG] TURN IP для исключения из WG: %s", ip)
+	// Если туннель уже поднят — маршрут нужен прямо сейчас, а не при
+	// следующем SetupWindowsWireGuard.
+	go applyTurnHostRoute(ip)
 }
 
 func getTurnExcludeIPs() []net.IP {
