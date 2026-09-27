@@ -441,7 +441,12 @@ func (pc *pipelineController) armTimeoutLocked(appCtx context.Context, step conn
 	}
 	timeout := 12 * time.Second
 	switch step {
-	case stepVK:
+	case stepDNS, stepVK:
+		// После pipeline_start (stepDNS) следующее событие — vk_creds_ok, так
+		// что этот таймер фактически ограничивает получение VK-кредов. 12с
+		// не хватало сразу после пробуждения/смены сети: первый запрос к VK
+		// API мог висеть на TCP-коннекте, и таймаут убивал сессию раньше,
+		// чем VK Auth успевал перейти на запасной путь.
 		timeout = 30 * time.Second
 	case stepTurn, stepDTLS:
 		// TURN allocate + DTLS через relay: 3 параллельных хендшейка по 20с
@@ -482,6 +487,18 @@ const (
 	// Если туннель продержался дольше — считаем предыдущие попытки
 	// «успешными» и начинаем backoff заново.
 	reconnectStableAfter = 2 * time.Minute
+
+	// tunnelDownRestartAfter — сколько поднятый туннель может прожить без
+	// единого живого воркера, прежде чем сессия будет перезапущена целиком.
+	//
+	// Воркеры умеют переподключаться сами, но после сна системы / смены
+	// сети это часто не удаётся: WG-интерфейс забирает весь трафик в мёртвый
+	// туннель (включая DNS для запроса новых VK-кредов), а старые TURN-креды
+	// отвечают 401 или молчат. Полный рестарт снимает WG, берёт свежие креды
+	// через физическую сеть и поднимает всё заново.
+	// Если воркеры восстанавливаются сами (обычно за 5–15 с) — не мешаем.
+	tunnelDownRestartAfter = 30 * time.Second
+	watchdogInterval       = 2 * time.Second
 )
 
 func NewOrchestrator(ctx context.Context, onTray func(bool, int64, int64, int32)) *Orchestrator {
@@ -639,7 +656,43 @@ func (o *Orchestrator) launch(p ConnectParams, isReconnect bool) (*coreSession, 
 	if o.onTray != nil {
 		go o.statsLoop(sess)
 	}
+	if p.AutoReconnect {
+		go o.watchdogLoop(sess)
+	}
 	return sess, nil
+}
+
+// watchdogLoop перезапускает сессию, если поднятый туннель слишком долго
+// остаётся без живых воркеров (см. tunnelDownRestartAfter). Перезапуск идёт
+// через обычный путь автопереподключения: stopSession(…, false) →
+// forwardEvents → scheduleReconnect.
+func (o *Orchestrator) watchdogLoop(sess *coreSession) {
+	t := time.NewTicker(watchdogInterval)
+	defer t.Stop()
+	var downSince time.Time
+	for {
+		select {
+		case <-sess.done:
+			return
+		case <-t.C:
+		}
+		if !sess.wasUp.Load() || sess.c.Stats().ActiveConnections > 0 {
+			downSince = time.Time{}
+			continue
+		}
+		if downSince.IsZero() {
+			downSince = time.Now()
+			continue
+		}
+		down := time.Since(downSince)
+		if down < tunnelDownRestartAfter {
+			continue
+		}
+		// log.Printf попадает и в файл сессии, и в UI (через wailsLogWriter).
+		log.Printf("[WATCHDOG] Нет живых воркеров %.0fs — перезапускаем сессию целиком", down.Seconds())
+		o.stopSession(sess, false)
+		return
+	}
 }
 
 // statsLoop опрашивает core.Stats() каждые 2с и дёргает onTray callback.

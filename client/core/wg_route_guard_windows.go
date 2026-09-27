@@ -38,6 +38,7 @@ type wgRuntime struct {
 	gateway     string          // текущий физический шлюз ("" = не найден)
 	iface       string          // интерфейс физического шлюза
 	turnRoutes  map[string]bool // TURN IP → /32 добавлен через текущий шлюз
+	turnIface   string          // интерфейс, на котором стоят turnRoutes
 	dnsOverride bool            // подменяем ли системный DNS на 127.0.0.1
 	stop        chan struct{}
 	done        chan struct{}
@@ -171,21 +172,67 @@ func (rt *wgRuntime) loop() {
 				curGw, curIface, gw, iface)
 		}
 		warnedAbsent = false
-		rt.switchGateway(curIface, gw, iface)
+		rt.switchGateway(gw, iface)
 	}
 }
 
-// switchGateway снимает исключения со старого интерфейса и ставит на новый.
-func (rt *wgRuntime) switchGateway(oldIface, gw, iface string) {
-	rt.removeTurnRoutes(oldIface)
-	removeExcludeRoutes()
+// stopping — остановлен ли guard (teardown ждёт выхода из switchGateway).
+// До startRouteGuard rt.stop == nil, и чтение из nil-канала просто не готово.
+func (rt *wgRuntime) stopping() bool {
+	select {
+	case <-rt.stop:
+		return true
+	default:
+		return false
+	}
+}
 
+// switchGateway переставляет исключения на новый шлюз.
+//
+// Каждая операция — отдельный запуск netsh/route, и сразу после выхода
+// системы из сна каждый может занимать ~1с; всего их набегает около 60.
+// Раньше сначала удалялось всё старое, потом добавлялось новое, и
+// TURN-маршруты могли появиться только через минуту — всё это время воркеры
+// не могли переподключиться, а teardown ждал окончания перестановки.
+// Теперь TURN-маршруты идут первыми, а между шагами проверяется остановка
+// guard'а.
+func (rt *wgRuntime) switchGateway(gw, iface string) {
 	rt.mu.Lock()
-	rt.gateway, rt.iface = gw, iface
+	routesIface := rt.turnIface
+	rt.gateway, rt.iface, rt.turnIface = gw, iface, iface
 	rt.mu.Unlock()
 
+	var stale map[string]bool
+	if routesIface != iface {
+		rt.removeTurnRoutes(routesIface)
+	} else {
+		// Тот же интерфейс: addHostRoute сам удаляет старый /32 перед
+		// добавлением, отдельное удаление — лишние запуски netsh.
+		rt.mu.Lock()
+		stale = rt.turnRoutes
+		rt.turnRoutes = make(map[string]bool)
+		rt.mu.Unlock()
+	}
 	rt.applyTurnRoutes()
+
+	if rt.stopping() {
+		// Прервали посреди перестановки — возвращаем старые /32 в учёт,
+		// чтобы teardown их удалил.
+		rt.mu.Lock()
+		for k := range stale {
+			rt.turnRoutes[k] = true
+		}
+		rt.mu.Unlock()
+		return
+	}
+	removeExcludeRoutes()
+	if rt.stopping() {
+		return
+	}
 	applyExcludeRoutes(gw, iface)
+	if rt.stopping() {
+		return
+	}
 
 	if rt.dnsOverride {
 		overrideInterfaceDNS(iface)
@@ -211,6 +258,9 @@ func (rt *wgRuntime) applyTurnRoutes() {
 	}
 	added := 0
 	for _, ip := range getTurnExcludeIPs() {
+		if rt.stopping() {
+			return
+		}
 		if rt.addTurnRoute(ip, gw, iface) {
 			added++
 		}

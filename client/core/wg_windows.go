@@ -226,6 +226,7 @@ func SetupWindowsWireGuard(rawConf, ifaceName string, customDNS []string, exclud
 		gateway:     origGateway,
 		iface:       origIface,
 		turnRoutes:  make(map[string]bool),
+		turnIface:   origIface,
 		dnsOverride: len(customDNS) > 0,
 	}
 	if origGateway != "" && origIface != "" {
@@ -323,7 +324,7 @@ func SetupWindowsWireGuard(rawConf, ifaceName string, customDNS []string, exclud
 		// даже если удаление TUN/default route по какой-то причине отвалится.
 		removeExcludeRoutes()
 		rt.mu.Lock()
-		turnIface := rt.iface
+		turnIface := rt.turnIface
 		rt.mu.Unlock()
 		rt.removeTurnRoutes(turnIface)
 		_ = runNetsh("interface", "ipv4", "delete", "route", "0.0.0.0/0", actualName, "0.0.0.0", "store=active")

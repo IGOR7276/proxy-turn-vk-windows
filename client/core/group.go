@@ -116,25 +116,30 @@ func WorkerGroup(
 	var wg sync.WaitGroup
 	var credsMu sync.RWMutex
 	var refreshMu sync.Mutex
-	var lastCredRefresh atomic.Int64
+	var lastCredRefresh atomic.Int64 // unix-время последней ПОПЫТКИ обновления
 
 	refreshCreds := func(reason string) bool {
 		refreshMu.Lock()
 		defer refreshMu.Unlock()
 
+		// Троттлим попытки, а не только успехи: при мёртвой сети (после сна,
+		// смены Wi-Fi) обновление падает по таймауту, и раньше все 9 воркеров
+		// группы по очереди ждали его на refreshMu по 35с каждый.
 		now := time.Now().Unix()
 		last := lastCredRefresh.Load()
 		if last > 0 && now-last < 15 {
 			log.Printf("[TURN] Креды уже обновлялись %d сек назад, ждём следующий retry (%s)", now-last, reason)
 			return true
 		}
+		lastCredRefresh.Store(now)
 
 		getStreamCache(credStreamID).invalidate(credStreamID)
 		if GetVkAuthMode() == "account" {
 			InvalidateInjectedTurnCreds(hash)
 		}
-		// Hard timeout 35s — иначе зависший auth endpoint блокирует ретраи навсегда
-		refreshCtx, refreshCancel := context.WithTimeout(context.Background(), 35*time.Second)
+		// Hard timeout 35s — иначе зависший auth endpoint блокирует ретраи навсегда.
+		// От ctx ядра — чтобы Stop не ждал завершения зависшего запроса.
+		refreshCtx, refreshCancel := context.WithTimeout(ctx, 35*time.Second)
 		defer refreshCancel()
 		u, p, urls, refreshErr := GetCreds(refreshCtx, hash, credStreamID)
 		if refreshErr != nil {
@@ -145,7 +150,6 @@ func WorkerGroup(
 		credsMu.Lock()
 		creds = &Credentials{User: u, Pass: p, TurnURLs: urls, CacheStreamID: credStreamID}
 		credsMu.Unlock()
-		lastCredRefresh.Store(time.Now().Unix())
 		// Новые креды могут прийти с другими TURN-серверами — их тоже нужно
 		// вывести из-под WG-маршрута, иначе трафик воркера зациклится в туннеле.
 		registerTurnExcludes(urls)
@@ -240,7 +244,14 @@ func WorkerGroup(
 
 					turnAllocAttrMissing := strings.Contains(errStrLower, "turn allocate") &&
 						strings.Contains(errStrLower, "attribute not found")
+					// pion отдаёт отказ в авторизации как
+					// "Allocate error response (error 401: Unauthorized)" — после
+					// сна / смены сети креды протухают именно так. Без этого
+					// паттерна креды не обновлялись никогда, и воркеры бесконечно
+					// ретраили с мёртвыми.
 					turnCredRefreshNeeded := turnAllocAttrMissing ||
+						strings.Contains(errStrLower, "error 401") ||
+						strings.Contains(errStrLower, "unauthorized") ||
 						strings.Contains(errStrLower, "turn allocate auth") ||
 						strings.Contains(errStrLower, "invalid credential") ||
 						strings.Contains(errStrLower, "stale nonce") ||
