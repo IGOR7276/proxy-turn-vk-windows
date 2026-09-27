@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 	"wg-turn-client/core"
 )
@@ -133,6 +134,34 @@ func configDir() string {
 	dir := filepath.Join(base, "wdtt")
 	_ = os.MkdirAll(dir, 0755)
 	return dir
+}
+
+// localDeviceID — постоянный ID этой установки, хранится в <config>/wdtt/device_id.
+// Сервер выдаёт WG-пир по device ID: без него все клиенты представлялись
+// как "unknown", получали один и тот же ключ/адрес и отбивали друг у друга
+// endpoint — туннель на обоих устройствах периодически замирал.
+func localDeviceID() string {
+	path := filepath.Join(configDir(), "device_id")
+	if b, err := os.ReadFile(path); err == nil {
+		if id := strings.TrimSpace(string(b)); id != "" {
+			return id
+		}
+	}
+	host, _ := os.Hostname()
+	host = strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' {
+			return r
+		}
+		return -1
+	}, host)
+	if host == "" {
+		host = "pc"
+	}
+	id := "win-" + host + "-" + uuid.NewString()[:8]
+	if err := os.WriteFile(path, []byte(id), 0644); err != nil {
+		log.Printf("[CORE] Не удалось сохранить device_id: %v", err)
+	}
+	return id
 }
 
 func profilePath(name string) string {
@@ -561,6 +590,11 @@ func (o *Orchestrator) launch(p ConnectParams, isReconnect bool) (*coreSession, 
 		fingerprint = prof.Fingerprint
 	}
 
+	deviceID := prof.DeviceID
+	if deviceID == "" {
+		deviceID = localDeviceID()
+	}
+
 	cfg := core.Config{
 		PeerAddr:    prof.PeerAddr,
 		Password:    prof.Password,
@@ -568,7 +602,7 @@ func (o *Orchestrator) launch(p ConnectParams, isReconnect bool) (*coreSession, 
 		Listen:      prof.Listen,
 		TurnHost:    prof.TurnHost,
 		TurnPort:    prof.TurnPort,
-		DeviceID:    prof.DeviceID,
+		DeviceID:    deviceID,
 		Fingerprint: fingerprint,
 		ClientIDs:   prof.ClientIDs,
 		Workers:     workers,
