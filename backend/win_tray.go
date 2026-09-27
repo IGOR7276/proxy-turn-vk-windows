@@ -10,6 +10,7 @@ import (
 	_ "image/png"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"syscall"
 	"unsafe"
@@ -140,6 +141,12 @@ func pngToHICON(data []byte, size int) win.HICON {
 }
 
 func runTrayLoop(iconData []byte, onShow, onToggle, onQuit func()) {
+	// Окно трея принадлежит потоку, который его создал, и GetMessage видит
+	// только сообщения своего потока. Без фиксации планировщик переносит
+	// горутину на другой поток ОС: GetMessage ждёт там, где окон нет, а
+	// поток-владелец сообщения не разбирает — иконка перестаёт реагировать.
+	runtime.LockOSThread()
+
 	hIcon := pngToHICON(iconData, 16)
 	if hIcon == 0 {
 		iconPath := filepath.Join(os.TempDir(), "wdtt-tray.png")
@@ -157,13 +164,13 @@ func runTrayLoop(iconData []byte, onShow, onToggle, onQuit func()) {
 			case wmTrayMsg:
 				ev := lp & 0xFFFF
 				switch ev {
-				case win.WM_LBUTTONUP:
+				// Двойной клик по иконке в Windows привычно открывает приложение,
+				// поэтому он делает то же, что одиночный. Раньше он переключал
+				// туннель: вместе с WM_LBUTTONUP окно открывалось, а соединение
+				// тут же рвалось. Подключение/отключение — через контекстное меню.
+				case win.WM_LBUTTONUP, win.WM_LBUTTONDBLCLK:
 					if onShow != nil {
 						onShow()
-					}
-				case win.WM_LBUTTONDBLCLK:
-					if onToggle != nil {
-						onToggle()
 					}
 				case win.WM_RBUTTONUP:
 					showTrayMenu(hwnd, onShow, onToggle, onQuit)

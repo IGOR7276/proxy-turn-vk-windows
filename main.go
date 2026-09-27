@@ -27,6 +27,7 @@ var serverBinary []byte
 var trayIcon []byte
 
 func main() {
+	backend.InstallCrashLog()
 	backend.Init(deployScript, serverBinary)
 	app := backend.NewApp(trayIcon)
 
