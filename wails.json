@@ -13,7 +13,7 @@
   "info": {
     "companyName": "WDTT Project",
     "productName": "WDTT for Windows",
-    "productVersion": "2.1.4",
+    "productVersion": "2.1.5",
     "copyright": "Copyright © 2026 WDTT Project. All rights reserved.",
     "comments": "VK Calls TURN/WireGuard tunnel client for Windows.",
     "fileDescription": "WDTT tunnel client"

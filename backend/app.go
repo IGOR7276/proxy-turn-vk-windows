@@ -18,7 +18,7 @@ import (
 // killOldInstances removed to reduce VirusTotal behavior alerts.
 // See process_windows.go for history.
 
-const appVersion = "2.1.3"
+const appVersion = "2.1.5"
 
 // App — Wails App, связующее звено между UI и Orchestrator.
 type App struct {
@@ -203,6 +203,9 @@ func (a *App) ForceDisconnect() {
 }
 
 // IsRunning — работает ли туннель прямо сейчас.
+// Version returns the current app version.
+func (a *App) Version() string { return appVersion }
+
 func (a *App) IsRunning() bool { return a.orch.IsRunning() }
 
 // Pause / Resume — doze-режим воркеров.

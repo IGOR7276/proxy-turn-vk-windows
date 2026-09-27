@@ -1,14 +1,13 @@
 import { useState, useEffect } from 'react';
-import { IconInfoCircle, IconBrandGithub, IconCopy, IconCheck, IconBolt, IconUsers, IconServer, IconClock, IconHeart, IconExternalLink, IconShield, IconWorld } from '@tabler/icons-react';
+import { IconInfoCircle, IconBrandGithub, IconCopy, IconCheck, IconBolt, IconUsers, IconServer, IconClock, IconExternalLink, IconShield, IconWorld } from '@tabler/icons-react';
 import iconUrl from '../assets/icon.png';
 import { logStore } from '../lib/stores/logStore';
 import { settingsStore } from '../lib/store';
 import { themeStore } from '../lib/stores/themeStore';
 import { tunnelStore } from '../lib/stores/tunnelStore';
-import { IsRunning, ForceDisconnect } from '../../wailsjs/go/backend/App';
+import { IsRunning, ForceDisconnect, Version } from '../../wailsjs/go/backend/App';
 
 
-const VERSION = '2.1.4';
 const BUILD_DATE = '31.07.2026';
 const REPO_URL = 'https://github.com/IGOR7276/proxy-turn-vk-windows';
 
@@ -16,9 +15,11 @@ export default function Info() {
   const [copied, setCopied] = useState<string | null>(null);
   const [stats, setStats] = useState({ logs: 0, hashes: 0, power: 0, mtu: 0, dnsEnabled: true });
   const [running, setRunning] = useState(false);
+  const [version, setVersion] = useState('');
   const [theme, setTheme] = useState(() => themeStore.get());
   const [tunnelState, setTunnelState] = useState(() => tunnelStore.get());
 
+  useEffect(() => { Version().then(v => setVersion(v || '—')).catch(() => setVersion('—')); }, []);
   useEffect(() => themeStore.subscribe(setTheme), []);
   useEffect(() => tunnelStore.subscribe(setTunnelState), []);
 
@@ -97,7 +98,7 @@ export default function Info() {
           </div>
           <div className="if-appname">WDTT</div>
           <div className="if-tagline">WireGuard-DTLS-Туннель-Трафик</div>
-          <div className="if-version-pill">v{VERSION} · {BUILD_DATE}</div>
+          <div className="if-version-pill">v{version} · {BUILD_DATE}</div>
         </div>
 
         {/* Session */}
@@ -180,10 +181,10 @@ export default function Info() {
               Версия
             </span>
             <span className="if-value">
-              v{VERSION}
+              v{version}
               <button
                 className={`if-icon-btn ${copied === 'v' ? 'if-icon-btn--ok' : ''}`}
-                onClick={() => copy('v', VERSION)}
+                onClick={() => copy('v', version)}
                 title="Копировать"
               >
                 {copied === 'v' ? <IconCheck size={13} /> : <IconCopy size={13} stroke={2} />}
@@ -214,11 +215,6 @@ export default function Info() {
             GitHub репозиторий
             <IconExternalLink size={14} />
           </a>
-        </div>
-
-        <div className="if-credits">
-          <IconHeart size={14} />
-          сделано с заботой для тех, кто верит в свободу интернета
         </div>
       </div>
     </>
