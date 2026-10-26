@@ -109,6 +109,7 @@ func RunSession(
 		tc          *turn.Client
 		relay       net.PacketConn
 		turnConn    net.PacketConn
+		turnUDP     *net.UDPConn
 		turnAddress string
 	)
 
@@ -194,6 +195,7 @@ func RunSession(
 			continue
 		}
 
+		turnUDP = c
 		break
 	}
 
@@ -203,6 +205,11 @@ func RunSession(
 		}
 		return false, fmt.Errorf("TURN connection failed: %w", turnErr)
 	}
+	// turn.Client.Close() и relay.Close() не закрывают переданный Conn —
+	// без этого каждый реконнект сессии оставлял висеть UDP-сокет и
+	// горутину tc.Listen(). Defer'ы выполняются в обратном порядке, так что
+	// сокет закроется последним, после отправки Refresh(0) из relay.Close().
+	defer func() { _ = turnUDP.Close() }()
 	defer relay.Close()
 	defer tc.Close()
 
