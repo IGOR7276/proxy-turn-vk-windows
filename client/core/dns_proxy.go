@@ -155,14 +155,25 @@ func (p *dnsProxy) handleQuery(query []byte, clientAddr net.Addr) {
 	listener := p.listener
 	p.mu.Unlock()
 
-	if handler != nil {
+	// Ответ строим сами только на A и AAAA. Остальные типы (HTTPS, MX,
+	// TXT…) уходят к upstream как обычно: подставить в них A-записи —
+	// значит отдать клиенту ответ не того типа.
+	qtype, _ := dnsQueryType(query)
+	if handler != nil && (qtype == dnsTypeA || qtype == dnsTypeAAAA) {
 		if domain := extractDNSQueryDomain(query); domain != "" {
 			ips := handler(domain)
 			if len(ips) > 0 {
 				// Домен матчит исключение (wildcard) и зарезолвлен — строим
 				// ответ вручную из полученных IP, чтобы клиент получил
 				// ответ сразу. /32 маршрут уже добавлен excluder-ом.
-				resp := buildDNSResponseWithA(query, ips)
+				// На AAAA — пустой ответ без ошибки: обход идёт только
+				// маршрутами IPv4, и клиент возьмёт адрес из A.
+				var resp []byte
+				if qtype == dnsTypeA {
+					resp = buildDNSResponseWithA(query, ips)
+				} else {
+					resp = buildDNSResponseWithA(query, nil)
+				}
 				if resp != nil {
 					p.responses.Add(1)
 					if listener != nil {
@@ -292,20 +303,52 @@ func extractDNSQueryDomain(query []byte) string {
 	return strings.Join(labels, ".")
 }
 
+const (
+	dnsTypeA    uint16 = 1
+	dnsTypeAAAA uint16 = 28
+)
+
+// dnsQueryType возвращает QTYPE первого вопроса запроса.
+func dnsQueryType(query []byte) (uint16, bool) {
+	off := 12
+	for off < len(query) {
+		l := int(query[off])
+		if l == 0 {
+			off++
+			if off+2 > len(query) {
+				return 0, false
+			}
+			return uint16(query[off])<<8 | uint16(query[off+1]), true
+		}
+		if l&0xC0 != 0 {
+			return 0, false
+		}
+		off += 1 + l
+	}
+	return 0, false
+}
+
 // buildDNSResponseWithA собирает минимальный DNS-ответ с A-записями
 // на основе исходного запроса. Используется для исключённых доменов,
 // резолвленных через оригинальный DNS — чтобы клиент получил ответ сразу,
 // без обращения к upstream через туннель.
 //
-// Копирует ID из запроса, выставляет флаги QR=1 (response), AA=1, RD=1, RA=1,
-// RCODE=0. QDCOUNT=1 (echo question), ANCOUNT=N (число IP).
+// Копирует ID из запроса, выставляет флаги QR=1 (response), RD=1, RA=1,
+// RCODE=0. QDCOUNT=1 (echo question), ANCOUNT — число IPv4-адресов.
+// Без IPv4-адресов — ответ без записей (NODATA), как на AAAA.
 func buildDNSResponseWithA(query []byte, ips []net.IP) []byte {
-	if len(query) < 13 || len(ips) == 0 {
+	if len(query) < 13 {
 		return nil
+	}
+	var v4s []net.IP
+	for _, ip := range ips {
+		if v4 := ip.To4(); v4 != nil {
+			v4s = append(v4s, v4)
+		}
 	}
 
 	// Header: 12 bytes
-	resp := make([]byte, 12, 64+len(ips)*16)
+	resp := make([]byte, 12, 64+len(v4s)*16)
 	// ID — копия из запроса
 	resp[0] = query[0]
 	resp[1] = query[1]
@@ -316,7 +359,7 @@ func buildDNSResponseWithA(query []byte, ips []net.IP) []byte {
 	resp[4] = 0x00
 	resp[5] = 0x01
 	// ANCOUNT = N
-	ancount := uint16(len(ips))
+	ancount := uint16(len(v4s))
 	resp[6] = byte(ancount >> 8)
 	resp[7] = byte(ancount & 0xFF)
 	// NSCOUNT, ARCOUNT = 0
@@ -343,12 +386,8 @@ func buildDNSResponseWithA(query []byte, ips []net.IP) []byte {
 	}
 	resp = append(resp, query[12:qEnd+4]...)
 
-	// Answer Section: по одной A-записи на каждый IP.
-	for _, ip := range ips {
-		v4 := ip.To4()
-		if v4 == nil {
-			continue // пропускаем IPv6 (для A-записи не подходит)
-		}
+	// Answer Section: по одной A-записи на каждый IPv4.
+	for _, v4 := range v4s {
 		// NAME: pointer на QNAME в offset 12 → 0xC00C
 		resp = append(resp, 0xC0, 0x0C)
 		// TYPE = A (1)
