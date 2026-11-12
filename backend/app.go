@@ -18,7 +18,7 @@ import (
 // killOldInstances removed to reduce VirusTotal behavior alerts.
 // See process_windows.go for history.
 
-const appVersion = "2.1.5"
+const appVersion = "2.2.0"
 
 // App — Wails App, связующее звено между UI и Orchestrator.
 type App struct {
