@@ -16,15 +16,15 @@
   --border-2: #EBF0F5;
   --text: #1A1A2A;
   --text-2: #4A5168;
-  --text-3: #6B7591;
-  --text-4: #97A0B3;
+  --text-3: #545D78;
+  --text-4: #616B86;
   --accent: #2D4A7A;
   --accent-soft: #E5EBF4;
   --accent-fg: #FFFFFF;
   --danger: #D64545;
   --success: #2E8B57;
   --seg-bg: #E4EAF1;
-  --seg-text: #6B7591;
+  --seg-text: #545D78;
   --input-bg: #FFFFFF;
   --input-border: #C8D2E0;
   --shadow: 0 1px 2px rgba(45, 74, 122, 0.04), 0 4px 12px rgba(45, 74, 122, 0.05);
@@ -51,15 +51,15 @@
   --border-2: #28283E;
   --text: #E8E8F0;
   --text-2: #B5B5CC;
-  --text-3: #8A8AAB;
-  --text-4: #5C5C7A;
+  --text-3: #9C9CBE;
+  --text-4: #8C8CAE;
   --accent: #9B8FD6;
   --accent-soft: #2E2A48;
   --accent-fg: #FFFFFF;
   --danger: #E07474;
   --success: #6FCF97;
   --seg-bg: #2A2A45;
-  --seg-text: #8A8AAB;
+  --seg-text: #9C9CBE;
   --input-bg: #1F1F35;
   --input-border: #383852;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
@@ -79,7 +79,6 @@
   color: var(--text);
   font-family: 'Geist', system-ui, sans-serif;
   font-weight: 500;
-  font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
 }
@@ -116,3 +115,19 @@ body {
   to   { opacity: 1; }
 }
 
+
+/* U7: единый видимый focus-ring для клавиатурной навигации. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* U7: уважаем системную настройку «меньше движения». */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

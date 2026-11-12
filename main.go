@@ -28,6 +28,11 @@ var trayIcon []byte
 
 func main() {
 	backend.InstallCrashLog()
+	// Единственный экземпляр: второй WDTT снёс бы WG-адаптер и DNS-прокси
+	// первого. Если уже запущен — активируем его окно и выходим.
+	if !backend.EnsureSingleInstance() {
+		return
+	}
 	backend.Init(deployScript, serverBinary)
 	app := backend.NewApp(trayIcon)
 

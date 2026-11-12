@@ -176,6 +176,10 @@ type StreamCredentialsCache struct {
 	mutex         sync.RWMutex
 	errorCount    atomic.Int32
 	lastErrorTime atomic.Int64
+	// quotaUntil — unixnano, до которого TURN Allocate с этими кредами
+	// заведомо получит 486. Квота общая на VK-аккаунт/IP, поэтому cooldown
+	// живёт на кэше и действует на все группы с теми же кредами.
+	quotaUntil atomic.Int64
 }
 
 const (
@@ -185,6 +189,10 @@ const (
 	errorWindow        = 10 * time.Second
 )
 
+// streamsPerCache — сколько групп (stream ID) делят один набор TURN-кредов.
+// Stream ID группы = groupID, поэтому группы 1..9 используют cache 0,
+// 10..19 — cache 1 и т.д. Без этого каждая группа делала отдельный
+// (сериализованный) запрос к VK, и старт растягивался на десятки секунд.
 var streamsPerCache = 10
 
 func getCacheID(streamID int) int {
@@ -230,6 +238,37 @@ func (c *StreamCredentialsCache) invalidate(streamID int) {
 	c.lastErrorTime.Store(0)
 
 	log.Printf("[STREAM %d] [VK Auth] Credentials cache invalidated", streamID)
+}
+
+// quotaRemaining — сколько ещё нельзя пытаться делать TURN Allocate.
+// 0 означает, что cooldown не активен.
+func (c *StreamCredentialsCache) quotaRemaining() time.Duration {
+	until := c.quotaUntil.Load()
+	if until <= 0 {
+		return 0
+	}
+	if d := time.Until(time.Unix(0, until)); d > 0 {
+		return d
+	}
+	return 0
+}
+
+// setQuotaCooldown выставляет паузу после 486, но никогда не сокращает уже
+// установленную: несколько воркеров могут получить отказ одновременно.
+func (c *StreamCredentialsCache) setQuotaCooldown(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	until := time.Now().Add(d).UnixNano()
+	for {
+		cur := c.quotaUntil.Load()
+		if cur >= until {
+			return
+		}
+		if c.quotaUntil.CompareAndSwap(cur, until) {
+			return
+		}
+	}
 }
 
 func cloneStringSlice(in []string) []string {

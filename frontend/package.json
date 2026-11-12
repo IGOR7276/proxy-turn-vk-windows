@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "generate": "node scripts/ensure-bindings.mjs --force",
+    "prebuild": "node scripts/ensure-bindings.mjs",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview"

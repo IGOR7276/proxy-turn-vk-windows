@@ -23,6 +23,7 @@ import ImportQwdtt from '../modals/ImportQwdtt';
 import AddSubscriptionModal from '../modals/AddSubscription';
 import HashEditor from '../modals/Hash';
 import Secrets from '../modals/Secrets';
+import Dashboard from '../components/Dashboard';
 import { serverStore, settingsStore, selectionStore } from '../lib/store';
 import { tunnelStore } from '../lib/stores/tunnelStore';
 import { toastStore } from '../lib/stores/toastStore';
@@ -30,7 +31,7 @@ import { wdttLinkStore } from '../lib/utils/wdttLink';
 import { stripVkUrl } from '../lib/utils/qwdttParser';
 import { SaveProfile, Connect as WailsConnect, Disconnect as WailsDisconnect, ForceDisconnect, GetVkAuthMode, VkLogin as BackendVkLogin, VkCallJoin, GetExcludeDomains, ListSubscriptions, UpdateSubscription, DeleteSubscription, OpenSubscriptionFolder, GetSubscriptionProfiles } from '../../wailsjs/go/backend/App';
 import { EventsOn, EventsOff } from '../../wailsjs/runtime/runtime';
-import type { Server, TunnelState, AppSettings, Subscription } from '../lib/types';
+import type { Server, TunnelState, Subscription } from '../lib/types';
 import type { backend } from '../../wailsjs/go/models';
 import { resolveDnsUpstream } from '../lib/types';
 
@@ -39,6 +40,7 @@ const TUNNEL_LABEL: Record<TunnelState, string> = {
   connecting: 'Подключение…',
   reconnecting: 'Переподключение…',
   connected: 'Подключено',
+  degraded: 'Нет воркеров…',
   disconnecting: 'Отключение…',
 };
 
@@ -232,7 +234,7 @@ export default function Tunnel() {
         fingerprint: s.fingerprint,
         mtu: s.mtu || 1280,
         hashes: filled,
-        obfsMode: 'audio',
+        obfsMode: s.obfsMode,
         autoWG: s.autoWG,
         noDNSProxy: !s.dnsProxyEnabled,
         dnsUpstream: dnsUpstream.length > 0 ? dnsUpstream : undefined,
@@ -271,7 +273,7 @@ export default function Tunnel() {
       }
       toastStore.show('Запускаю туннель', 2000);
       await doConnect();
-    } else if (tunnelStateRef.current === 'connected' || tunnelStateRef.current === 'connecting' || tunnelStateRef.current === 'reconnecting') {
+    } else if (tunnelStateRef.current === 'connected' || tunnelStateRef.current === 'connecting' || tunnelStateRef.current === 'reconnecting' || tunnelStateRef.current === 'degraded') {
       tunnelStore.set('disconnecting');
       try {
         await WailsDisconnect();
@@ -293,7 +295,7 @@ export default function Tunnel() {
     setSelected(s);
   };
 
-  const syncSubscriptionProfiles = (subId: string, profs: Record<string, backend.ProfileData>) => {
+  function syncSubscriptionProfiles(subId: string, profs: Record<string, backend.ProfileData>) {
     // Remove stale profiles from this subscription.
     const others = serverStore.getAll().filter(s => s.subscriptionId !== subId);
 
@@ -324,7 +326,7 @@ export default function Tunnel() {
 
     serverStore.save(others);
     setServers(others);
-  };
+  }
 
   const handleSubscriptionSync = async (id: string) => {
     try {
@@ -518,6 +520,8 @@ export default function Tunnel() {
       <div className="tn-page">
         <h1 className="tn-title">Настройки туннеля</h1>
 
+        <Dashboard />
+
         {/* CARD 1: IP + Hash btn */}
         <div className="tn-card">
           <div className="tn-field">
@@ -559,20 +563,8 @@ export default function Tunnel() {
           )}
         </div>
 
-        {/* CARD 2: Toggles + Link paste */}
+        {/* CARD 2: Link paste */}
         <div className="tn-card">
-          <div className="tn-toggle-row">
-            <span className="tn-toggle-row-label">Авто капча</span>
-            <button
-              className={`tn-toggle${settings.bypassMode === 'АВТ' ? ' tn-toggle--on' : ''}`}
-              onClick={() => {
-                const next: AppSettings = { ...settings, bypassMode: settings.bypassMode === 'АВТ' ? 'РУЧ' : 'АВТ' };
-                setSettings(next);
-                settingsStore.save(next);
-              }}
-            />
-          </div>
-          <div className="tn-divider" />
           <button
             className="tn-link-row"
             onClick={() => setPasteLinkOpen(true)}
@@ -610,13 +602,13 @@ export default function Tunnel() {
             Секреты
           </button>
           <button
-            className={`tn-action ${tunnelState === 'connected' || tunnelState === 'connecting' || tunnelState === 'reconnecting' ? 'tn-action--danger' : 'tn-action--filled'}`}
+            className={`tn-action ${tunnelState === 'connected' || tunnelState === 'connecting' || tunnelState === 'reconnecting' || tunnelState === 'degraded' ? 'tn-action--danger' : 'tn-action--filled'}`}
             onClick={handleConnect}
           >
-            {tunnelState === 'connected' || tunnelState === 'connecting' || tunnelState === 'reconnecting' ? (
+            {tunnelState === 'connected' || tunnelState === 'connecting' || tunnelState === 'reconnecting' || tunnelState === 'degraded' ? (
               <>
                 <IconPlayerStopFilled size={18} />
-                {tunnelState === 'connected' ? 'Отключить' : TUNNEL_LABEL[tunnelState]}
+                {tunnelState === 'connected' || tunnelState === 'degraded' ? 'Отключить' : TUNNEL_LABEL[tunnelState]}
               </>
             ) : (
               <>

@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -137,6 +138,10 @@ func base64ToHex(b64 string) (string, error) {
 var (
 	wgTeardownMu sync.Mutex
 	wgTeardownFn func()
+
+	// ipv6FirewallBlocked — включён ли fallback-блок IPv6 через firewall
+	// (используется, если маршруты ::/1 и 8000::/1 добавить не удалось).
+	ipv6FirewallBlocked atomic.Bool
 )
 
 // globalDNSProxy и originalDNSByIf управляют локальным DNS-прокси на
@@ -216,6 +221,7 @@ func SetupWindowsWireGuard(rawConf, ifaceName string, customDNS []string, exclud
 		log.Printf("[WG] Предупреждение: не удалось добавить маршрут по умолчанию: %v", err)
 	}
 
+
 	// TURN-исключения: добавляем /32 маршруты на TURN-сервера через оригинальный шлюз.
 	// Это критично — без них WG-default route 0.0.0.0/0 перехватит трафик к TURN,
 	// и туннель упадёт в первую же секунду. Состояние живёт в wgRuntime, чтобы
@@ -278,6 +284,12 @@ func SetupWindowsWireGuard(rawConf, ifaceName string, customDNS []string, exclud
 		return fmt.Errorf("Up: %w", err)
 	}
 
+	// IPv6 выводим из-под прямой маршрутизации: иначе трафик уходит мимо
+	// туннеля. Делаем после успешного Up(), чтобы при ошибке старта не
+	// оставить в системе «чёрную дыру» для всего IPv6.
+	// См. addWindowsIPv6BlackholeRoutes.
+	addWindowsIPv6BlackholeRoutes(actualName)
+
 	// Регистрируем teardown. Делаем это ПОСЛЕ успешного Up(), чтобы при ошибке
 	// выше маршруты не остались без устройства.
 	wgTeardownMu.Lock()
@@ -327,6 +339,8 @@ func SetupWindowsWireGuard(rawConf, ifaceName string, customDNS []string, exclud
 		turnIface := rt.turnIface
 		rt.mu.Unlock()
 		rt.removeTurnRoutes(turnIface)
+		removeWindowsIPv6BlackholeRoutes(actualName)
+		unblockIPv6ViaFirewall()
 		_ = runNetsh("interface", "ipv4", "delete", "route", "0.0.0.0/0", actualName, "0.0.0.0", "store=active")
 		_ = runNetsh("interface", "ipv4", "delete", "address", fmt.Sprintf("name=%s", actualName), fmt.Sprintf("address=%s", cfg.address), "store=active")
 		log.Printf("[WG] Teardown завершён")
@@ -552,6 +566,77 @@ func addWindowsDefaultRoute(iface string) error {
 	_ = runNetsh("interface", "ipv4", "delete", "route", "0.0.0.0/0", iface, "0.0.0.0", "store=active")
 	return runNetsh("interface", "ipv4", "add", "route", "0.0.0.0/0", iface, "0.0.0.0", "metric=1", "store=active")
 }
+
+// IPv6-blackhole.
+//
+// WG-конфиг от сервера содержит только IPv4 (Address = 10.66.0.x/24,
+// AllowedIPs = 0.0.0.0/0). Пока IPv6 на физическом интерфейсе жив, весь
+// IPv6-трафик приложений (YouTube, Cloudflare и т.п.) уходит мимо туннеля —
+// напрямую провайдеру, где он либо блокируется, либо деанонимизирует
+// пользователя. При этом DNS-прокси может вернуть AAAA, и приложение
+// предпочтёт IPv6 → «туннель вроде подключён, а сайты не открываются».
+//
+// Решение: две «половинные» дефолтные маршрута ::/1 и 8000::/1 через
+// WG-интерфейс. Вместе они покрывают весь IPv6, но не конфликтуют с
+// системным ::/0 (Windows не любит два дефолта). Пакеты уходят в wintun,
+// где WireGuard их отбрасывает (в AllowedIPs только IPv4) — фактически
+// чёрная дыра. Если маршруты добавить не удалось (IPv6 отключён на
+// адаптере), включаем fallback — блокирующее правило firewall.
+func addWindowsIPv6BlackholeRoutes(iface string) bool {
+	ok := true
+	for _, prefix := range []string{"::/1", "8000::/1"} {
+		// Сначала удаляем возможный старый маршрут: после аварийного
+		// завершения предыдущей сессии он мог остаться.
+		_ = runNetsh("interface", "ipv6", "delete", "route", "prefix="+prefix, "interface="+iface, "store=active")
+		if err := runNetsh("interface", "ipv6", "add", "route", "prefix="+prefix, "interface="+iface, "metric=1", "store=active"); err != nil {
+			log.Printf("[WG] Не удалось добавить IPv6-маршрут %s через %s: %v", prefix, iface, err)
+			ok = false
+		}
+	}
+	if ok {
+		log.Printf("[WG] IPv6 заблокирован маршрутами ::/1 + 8000::/1 через %s", iface)
+		return true
+	}
+	// Маршруты не встали — убираем то, что успели добавить, и режем IPv6
+	// firewall'ом, чтобы не оставить «половину» пространства снаружи.
+	removeWindowsIPv6BlackholeRoutes(iface)
+	blockIPv6ViaFirewall()
+	return false
+}
+
+// removeWindowsIPv6BlackholeRoutes убирает маршруты ::/1 и 8000::/1.
+func removeWindowsIPv6BlackholeRoutes(iface string) {
+	for _, prefix := range []string{"::/1", "8000::/1"} {
+		_ = runNetsh("interface", "ipv6", "delete", "route", "prefix="+prefix, "interface="+iface, "store=active")
+	}
+}
+
+// blockIPv6ViaFirewall — fallback, если маршруты не добавились.
+// Блокируем исходящий IPv6 целиком на время работы туннеля.
+func blockIPv6ViaFirewall() {
+	if ipv6FirewallBlocked.Swap(true) {
+		return
+	}
+	err := runNetsh("advfirewall", "firewall", "add", "rule",
+		"name=WDTT-IPv6-Block", "dir=out", "action=block",
+		"protocol=any", "remoteip=::/0", "profile=any", "enable=yes")
+	if err != nil {
+		ipv6FirewallBlocked.Store(false)
+		log.Printf("[WG] ⚠ Не удалось заблокировать IPv6 через firewall: %v", err)
+		return
+	}
+	log.Printf("[WG] IPv6 заблокирован правилом firewall WDTT-IPv6-Block (fallback)")
+}
+
+// unblockIPv6ViaFirewall удаляет fallback-правило firewall.
+func unblockIPv6ViaFirewall() {
+	if !ipv6FirewallBlocked.Swap(false) {
+		return
+	}
+	_ = runNetsh("advfirewall", "firewall", "delete", "rule", "name=WDTT-IPv6-Block")
+	log.Printf("[WG] IPv6-firewall-правило удалено")
+}
+
 
 // getDefaultGateway возвращает текущий IPv4 шлюз по умолчанию и имя интерфейса.
 // Сначала пробует PowerShell, затем route print как fallback.

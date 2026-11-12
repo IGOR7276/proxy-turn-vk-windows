@@ -113,6 +113,92 @@ func obfsBuildNonce(ssrc uint32, seq uint16, ts uint32) []byte {
 	return n
 }
 
+// ─── Replay protection ───
+
+// Окно повторов на приёмной стороне. Заголовок не меняется, поэтому
+// совместимость с сервером полная: это чисто локальная проверка.
+//
+// DTLS тоже отбрасывает дубликаты (ReplayProtectionWindow=64), но его окно
+// сбрасывается при новом epoch, а расшифровка obfs-слоя выполняется раньше.
+// Здесь повторный пакет отсекается до обращения к DTLS, без лишнего AEAD.
+const (
+	// 4096 пакетов * 961 тик — примерно 4 секунды аудио при 20мс фреймах.
+	replayWindowSpan       = uint64(4096 * 961)
+	replayWindowMaxEntries = 8192
+)
+
+type replayWindow struct {
+	mu          sync.Mutex
+	seen        map[[12]byte]uint64
+	ssrc        uint32
+	highestTime uint64
+	initialized bool
+}
+
+// accept проверяет, что пакет не является повтором, и запоминает его.
+// Вызывать только после успешного unwrap, иначе мусорные пакеты смогут
+// раздувать состояние окна.
+func (w *replayWindow) accept(wire []byte) bool {
+	if len(wire) < 13 {
+		return false
+	}
+	ssrc := binary.BigEndian.Uint32(wire[8:12])
+	seq := binary.BigEndian.Uint16(wire[2:4])
+	ts := binary.BigEndian.Uint32(wire[4:8])
+
+	var nonce [12]byte
+	copy(nonce[:], obfsBuildNonce(ssrc, seq, ts))
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if !w.initialized {
+		w.ssrc = ssrc
+		w.highestTime = uint64(ts)
+		w.seen = make(map[[12]byte]uint64, 4096)
+		w.initialized = true
+	} else if w.ssrc != ssrc {
+		// Чужой SSRC в рамках сессии — не наш поток.
+		return false
+	}
+
+	if _, exists := w.seen[nonce]; exists {
+		return false
+	}
+
+	// Расширяем 32-битный timestamp до 64 бит, чтобы корректно переживать
+	// его переполнение (каждые ~2^32 тика).
+	base := w.highestTime &^ uint64(0xffffffff)
+	extended := base | uint64(ts)
+	if extended+(1<<31) < w.highestTime {
+		extended += 1 << 32
+	} else if extended > w.highestTime+(1<<31) && extended >= 1<<32 {
+		extended -= 1 << 32
+	}
+
+	if extended+replayWindowSpan < w.highestTime {
+		return false
+	}
+	if extended > w.highestTime {
+		w.highestTime = extended
+	}
+
+	if len(w.seen) >= replayWindowMaxEntries {
+		cutoff := w.highestTime - min(w.highestTime, replayWindowSpan)
+		for value, packetTime := range w.seen {
+			if packetTime < cutoff {
+				delete(w.seen, value)
+			}
+		}
+		if len(w.seen) >= replayWindowMaxEntries {
+			return false
+		}
+	}
+
+	w.seen[nonce] = extended
+	return true
+}
+
 // ─── Wrap (encrypt + add RTP header) ───
 
 // obfsWrapPacket wraps a plaintext payload into an RTP-like packet with authenticated encryption.

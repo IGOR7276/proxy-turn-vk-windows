@@ -26,9 +26,11 @@ import (
 
 func vkLogf(format string, args ...interface{}) {
 	msg := fmt.Sprintf("[VK Auth] "+format, args...)
-	log.Printf(msg)
-	if vkAuth != nil && vkAuth.ctx != nil {
-		wailsRuntime.EventsEmit(vkAuth.ctx, "log", "INFO", msg)
+	log.Print(msg)
+	// Во время активной сессии log.Print уже уходит в UI через wailsLogWriter;
+	// прямой emit нужен только до его установки, иначе строки дублируются.
+	if vkAuth != nil && vkAuth.ctx != nil && !logWriterActive.Load() {
+		emitLogEvent(vkAuth.ctx, "INFO", msg)
 	}
 }
 

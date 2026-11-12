@@ -110,6 +110,16 @@ wails build
 
 Результат: `build/bin/wdtt.exe`
 
+Если нужна только проверка/сборка фронтенда (без Go-бинарника):
+
+```powershell
+cd frontend
+npm install
+npm run build   # при отсутствии frontend/wailsjs биндинги сгенерируются автоматически
+```
+
+Для принудительной перегенерации биндингов: `npm run generate` (требует установленный Wails CLI).
+
 
 ## 🔑 Получить VK-хеш
 

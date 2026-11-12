@@ -25,7 +25,7 @@ export default function CaptchaSolve({ onClose }: CaptchaSolveProps) {
       await SendCaptchaResult(t);
       setStatus('success');
       setTimeout(() => onClose(), 1200);
-    } catch (err: any) {
+    } catch (err: unknown) {
       setError(String(err ?? 'Ошибка отправки'));
       setStatus('input');
     }

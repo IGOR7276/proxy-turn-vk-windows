@@ -63,5 +63,22 @@ func RequestConfig(conn net.Conn, localPort, deviceID, password string) (string,
 	return resp, nil
 }
 
+// SendAuth привязывает DTLS-сессию к устройству и паролю. Её шлют воркеры,
+// которые не запрашивают конфиг (GETCONF уже авторизует свою сессию).
+// Без AUTH сервер считает сессию анонимной и может сразу её закрыть —
+// воркер получает EOF через секунду после READY и уходит в цикл
+// переподключений. Старые серверы без поддержки AUTH перешлют пакет в
+// WireGuard, а тот молча отбросит его как невалидный.
+func SendAuth(conn net.Conn, deviceID, password string) error {
+	payload := fmt.Sprintf("AUTH:%s|%s", deviceID, password)
+	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	_, err := conn.Write([]byte(payload))
+	_ = conn.SetWriteDeadline(time.Time{})
+	if err != nil {
+		return fmt.Errorf("отправка AUTH: %w", err)
+	}
+	return nil
+}
+
 
 

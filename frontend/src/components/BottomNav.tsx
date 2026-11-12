@@ -43,23 +43,31 @@ export default function BottomNav() {
         .bn-theme { display: flex; align-items: center; justify-content: center; width: 44px; flex-shrink: 0; border: none; background: transparent; color: var(--text-3); cursor: pointer; border-radius: var(--r-nav-active); transition: color 0.15s, background 0.15s; }
         .bn-theme:hover { color: var(--text); background: var(--bg-2); }
       `}</style>
-      <nav className="bn-bar">
+      <nav className="bn-bar" aria-label="Основная навигация">
         {TABS.map(({ path, icon: Icon, label }) => {
           const active = location.pathname === path;
           return (
             <button
               key={path}
+              type="button"
               className={`bn-item${active ? ' bn-item--active' : ''}`}
               onClick={() => navigate(path)}
+              aria-current={active ? 'page' : undefined}
             >
-              <Icon size={20} stroke={2} />
+              <Icon size={20} stroke={2} aria-hidden="true" />
               <span>{label}</span>
             </button>
           );
         })}
-        <div className="bn-divider" />
-        <button className="bn-theme" onClick={toggleTheme} title="Сменить тему">
-          {theme === 'light' ? <IconMoon size={20} stroke={2} /> : <IconSun size={20} stroke={2} />}
+        <div className="bn-divider" aria-hidden="true" />
+        <button
+          type="button"
+          className="bn-theme"
+          onClick={toggleTheme}
+          title="Сменить тему"
+          aria-label={theme === 'light' ? 'Включить тёмную тему' : 'Включить светлую тему'}
+        >
+          {theme === 'light' ? <IconMoon size={20} stroke={2} aria-hidden="true" /> : <IconSun size={20} stroke={2} aria-hidden="true" />}
         </button>
       </nav>
     </>

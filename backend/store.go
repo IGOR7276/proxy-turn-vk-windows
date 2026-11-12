@@ -14,6 +14,9 @@ import (
 )
 
 // AppSettings — persisted application settings.
+//
+// Q1: это единственный источник правды для настроек UI. Фронтенд больше не
+// хранит их в localStorage (кроме одноразовой миграции при первом запуске).
 type AppSettings struct {
 	AutoStart     bool   `json:"autoStart"`
 	ObfsMode      string `json:"obfsMode,omitempty"`
@@ -21,6 +24,25 @@ type AppSettings struct {
 	VkAuthMode    string `json:"vkAuthMode,omitempty"`
 	CloseAction   string `json:"closeAction,omitempty"`
 	UpdateChannel string `json:"updateChannel,omitempty"`
+
+	// Поля, которые раньше жили только в localStorage фронтенда.
+	Power           int      `json:"power"`
+	MTU             int      `json:"mtu"`
+	Tray            bool     `json:"tray"`
+	Hashes          []string `json:"hashes"`
+	LinkMode        bool     `json:"linkMode"`
+	Fingerprint     string   `json:"fingerprint"`
+	DNSProxyEnabled bool     `json:"dnsProxyEnabled"`
+	DNSProvider     string   `json:"dnsProvider"`
+	DNSCustom       string   `json:"dnsCustom"`
+	AutoWG          bool     `json:"autoWG"`
+	WGInterface     string   `json:"wgInterface"`
+	AutoReconnect   bool     `json:"autoReconnect"`
+
+	// SelectedServer — id выбранного сервера (хранится рядом с серверами).
+	SelectedServer string `json:"selectedServer,omitempty"`
+	// SchemaVersion — версия формата конфига для будущих миграций.
+	SchemaVersion int `json:"schemaVersion,omitempty"`
 }
 
 // SubscriptionProfile — profile inside a subscription JSON.
@@ -58,6 +80,11 @@ type Subscription struct {
 	LastSyncError    string  `json:"lastSyncError,omitempty"`
 }
 
+// settingsSchemaVersion — версия формата config.json. Конфиги без версии
+// (SchemaVersion == 0) считаются старыми: в них не было части полей, для них
+// подставляются исторические дефолты.
+const settingsSchemaVersion = 2
+
 func (s *AppSettings) fillDefaults() {
 	if s.ObfsMode == "" {
 		s.ObfsMode = "audio"
@@ -74,6 +101,35 @@ func (s *AppSettings) fillDefaults() {
 	if s.UpdateChannel == "" {
 		s.UpdateChannel = "stable"
 	}
+
+	if s.Power <= 0 {
+		s.Power = 9
+	}
+	if s.Power > 100 {
+		s.Power = 100
+	}
+	if s.MTU <= 0 {
+		s.MTU = 1280
+	}
+	if s.Fingerprint == "" {
+		s.Fingerprint = "chrome"
+	}
+	if s.DNSProvider == "" {
+		s.DNSProvider = "google"
+	}
+	if s.DNSCustom == "" {
+		s.DNSCustom = "8.8.8.8,1.1.1.1"
+	}
+	if s.WGInterface == "" {
+		s.WGInterface = "WDTT"
+	}
+	if len(s.Hashes) < 4 {
+		h := make([]string, 4)
+		copy(h, s.Hashes)
+		s.Hashes = h
+	} else if len(s.Hashes) > 4 {
+		s.Hashes = s.Hashes[:4]
+	}
 }
 
 // Store provides atomic read/write of config.json and profiles.
@@ -81,6 +137,9 @@ type Store struct {
 	mu       sync.RWMutex
 	settings AppSettings
 	configDir string
+	// legacySettings — true, если config.json отсутствовал или был старого
+	// формата. Нужно для одноразовой миграции настроек из localStorage (Q1).
+	legacySettings bool
 }
 
 // NewStore creates config directories and loads existing settings.
@@ -92,9 +151,37 @@ func NewStore() *Store {
 	_ = os.MkdirAll(filepath.Join(dir, "logs"), 0755)
 
 	s := &Store{configDir: dir}
+	s.legacySettings = s.detectLegacySettings()
 	s.settings = s.loadSettingsLocked()
-	s.settings.fillDefaults()
 	return s
+}
+
+// detectLegacySettings проверяет, был ли config.json старого формата.
+func (s *Store) detectLegacySettings() bool {
+	data, err := os.ReadFile(s.settingsPath())
+	if err != nil {
+		return true
+	}
+	var st AppSettings
+	if err := json.Unmarshal(data, &st); err != nil {
+		return true
+	}
+	return st.SchemaVersion < settingsSchemaVersion
+}
+
+// LegacyMigrationPending — нужно ли перенести старые настройки из localStorage.
+func (s *Store) LegacyMigrationPending() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.legacySettings
+}
+
+// MarkLegacyMigrated фиксирует, что миграция выполнена: повторно настройки
+// из localStorage применяться не будут.
+func (s *Store) MarkLegacyMigrated() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.legacySettings = false
 }
 
 func (s *Store) settingsPath() string {
@@ -102,19 +189,30 @@ func (s *Store) settingsPath() string {
 }
 
 func (s *Store) loadSettingsLocked() AppSettings {
-	data, err := os.ReadFile(s.settingsPath())
-	if err != nil {
-		return AppSettings{}
-	}
 	var st AppSettings
-	if err := json.Unmarshal(data, &st); err != nil {
-		return AppSettings{}
+	data, err := os.ReadFile(s.settingsPath())
+	if err == nil {
+		if err := json.Unmarshal(data, &st); err != nil {
+			st = AppSettings{}
+		}
 	}
+	if st.SchemaVersion == 0 {
+		// Legacy-конфиг (или первый запуск): булевых полей ещё не было.
+		// AutoStart уже хранился, поэтому его не трогаем.
+		st.Tray = true
+		st.LinkMode = true
+		st.DNSProxyEnabled = true
+		st.AutoWG = true
+		st.AutoReconnect = true
+	}
+	st.fillDefaults()
+	st.SchemaVersion = settingsSchemaVersion
 	return st
 }
 
 func (s *Store) saveSettingsLocked(st AppSettings) error {
 	st.fillDefaults()
+	st.SchemaVersion = settingsSchemaVersion
 	data, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
 		return err
@@ -173,6 +271,7 @@ func (s *Store) LoadProfile(name string) (*ProfileData, error) {
 		if data, err := os.ReadFile(path); err == nil {
 			var p ProfileData
 			if err := json.Unmarshal(data, &p); err == nil {
+				unprotectProfile(&p)
 				return &p, nil
 			}
 		}
@@ -181,11 +280,12 @@ func (s *Store) LoadProfile(name string) (*ProfileData, error) {
 }
 
 // SaveProfile writes a profile atomically (always to main profiles dir).
+// Пароль шифруется DPAPI (Q10): на диске — dpapi:v1:..., в памяти — открытый.
 func (s *Store) SaveProfile(name string, p ProfileData) error {
 	if name == "" {
 		return fmt.Errorf("profile name is required")
 	}
-	data, err := json.MarshalIndent(p, "", "  ")
+	data, err := json.MarshalIndent(protectProfile(p), "", "  ")
 	if err != nil {
 		return err
 	}
@@ -286,6 +386,7 @@ func (s *Store) GetSubscriptionProfiles() map[string]ProfileData {
 			if err := json.Unmarshal(data, &p); err != nil {
 				continue
 			}
+			unprotectProfile(&p)
 			name := strings.TrimSuffix(pf.Name(), ".json")
 			out[name] = p
 		}
@@ -443,7 +544,7 @@ func (s *Store) syncSubscriptionLocked(sub *Subscription, data *SubscriptionData
 		if p.Port > 0 {
 			prof.Listen = fmt.Sprintf("127.0.0.1:%d", p.Port)
 		}
-		data, err := json.MarshalIndent(prof, "", "  ")
+		data, err := json.MarshalIndent(protectProfile(prof), "", "  ")
 		if err != nil {
 			continue
 		}

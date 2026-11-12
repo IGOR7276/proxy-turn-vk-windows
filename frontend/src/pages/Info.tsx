@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { IconInfoCircle, IconBrandGithub, IconCopy, IconCheck, IconBolt, IconUsers, IconServer, IconClock, IconExternalLink, IconShield, IconWorld } from '@tabler/icons-react';
 import iconUrl from '../assets/icon.png';
 import { logStore } from '../lib/stores/logStore';
-import { settingsStore } from '../lib/store';
+import { settingsStore, serverStore, selectionStore } from '../lib/store';
 import { themeStore } from '../lib/stores/themeStore';
 import { tunnelStore } from '../lib/stores/tunnelStore';
 import { IsRunning, ForceDisconnect, Version } from '../../wailsjs/go/backend/App';
@@ -26,10 +26,16 @@ export default function Info() {
   useEffect(() => {
     const update = () => {
       const s = settingsStore.get();
+      // Мощность берём у выбранного профиля: именно она уходит в воркеры,
+      // глобальный settings.power в подключении не используется.
+      const selectedId = selectionStore.get();
+      const selected = selectedId
+        ? serverStore.getAll().find(x => x.id === selectedId)
+        : undefined;
       setStats({
         logs: logStore.getAll().length,
         hashes: s.hashes.filter(h => h.trim()).length,
-        power: s.power,
+        power: selected?.power ?? s.power,
         mtu: s.mtu,
         dnsEnabled: s.dnsProxyEnabled,
       });
@@ -79,6 +85,7 @@ export default function Info() {
         .if-stat-lbl { font-size: 11px; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.4px; margin-top: 4px; }
         .if-status-dot { width: 8px; height: 8px; border-radius: 50%; }
         .if-status-dot--on { background: var(--success); }
+        .if-status-dot--warn { background: var(--danger); }
         .if-status-dot--off { background: var(--text-4); }
         .if-link { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 12px; border: 1.5px solid var(--border); border-radius: var(--r-input); background: var(--surface-2); color: var(--accent); text-decoration: none; font-family: 'Geist', sans-serif; font-size: 14px; font-weight: 600; margin: 4px 0; transition: background 0.15s; cursor: pointer; }
         .if-link:hover { background: var(--bg-2); }
@@ -110,8 +117,8 @@ export default function Info() {
               Статус
             </span>
             <span className="if-value" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <span className={`if-status-dot ${running ? 'if-status-dot--on' : 'if-status-dot--off'}`} />
-              {running ? 'Активен' : tunnelState === 'connecting' ? 'Подключение' : tunnelState === 'reconnecting' ? 'Переподключение' : 'Не запущен'}
+              <span className={`if-status-dot ${tunnelState === 'degraded' ? 'if-status-dot--warn' : running ? 'if-status-dot--on' : 'if-status-dot--off'}`} aria-hidden="true" />
+              {tunnelState === 'degraded' ? 'Деградация' : running ? 'Активен' : tunnelState === 'connecting' ? 'Подключение' : tunnelState === 'reconnecting' ? 'Переподключение' : 'Не запущен'}
             </span>
           </div>
           <div className="if-row">
@@ -186,6 +193,7 @@ export default function Info() {
                 className={`if-icon-btn ${copied === 'v' ? 'if-icon-btn--ok' : ''}`}
                 onClick={() => copy('v', version)}
                 title="Копировать"
+                aria-label="Копировать версию"
               >
                 {copied === 'v' ? <IconCheck size={13} /> : <IconCopy size={13} stroke={2} />}
               </button>

@@ -36,6 +36,11 @@ type Config struct {
 	// Поддерживает wildcards (*.example.com). Гибридный режим: DNS-прокси
 	// резолвит исключённые домены через оригинальный DNS + добавляет /32 маршруты.
 	ExcludeDomains []string
+
+	// WGConfig — уже полученный ранее WireGuard-конфиг (кэш уровня бэкенда).
+	// Если задан, ядро поднимает туннель сразу, не дожидаясь DTLS exchange
+	// и GETCONF от сервера — реконнект занимает ~1с вместо 10-20с.
+	WGConfig string
 }
 
 // EventType — тип события от ядра.
@@ -68,6 +73,8 @@ type Core struct {
 	pauseFlag int32
 	events    chan Event
 	stats     *Stats
+	disp      *Dispatcher
+	startedAt time.Time
 
 	turnIPsMu sync.Mutex
 	turnIPs   []string
@@ -86,7 +93,20 @@ type Core struct {
 	eventsMu     sync.RWMutex
 	eventsClosed bool
 
+	// Worker layer: воркеров можно перезапустить (soft restart), не снося
+	// WG-интерфейс и DNS-прокси. См. RestartWorkers.
+	workerMu     sync.Mutex
+	workerLayer  *workerLayer
+	workerLaunch func(ctx context.Context, needConfig bool)
+	workerGen    atomic.Int64
+
 	once sync.Once
+}
+
+// workerLayer — одно поколение воркеров (группы + их сессии).
+type workerLayer struct {
+	cancel context.CancelFunc
+	done   chan struct{}
 }
 
 const wgConfigCacheTTL = 60 * time.Second
@@ -205,11 +225,12 @@ func (c *Core) Start(ctx context.Context) (<-chan Event, error) {
 	}
 
 	tp := &TurnParams{
-		Host:     c.cfg.TurnHost,
-		Port:     c.cfg.TurnPort,
-		Hashes:   c.cfg.Hashes,
-		WrapKey:  wrapKey,
-		ObfsMode: c.cfg.ObfsMode,
+		Host:      c.cfg.TurnHost,
+		Port:      c.cfg.TurnPort,
+		Hashes:    c.cfg.Hashes,
+		WrapKey:   wrapKey,
+		ObfsMode:  c.cfg.ObfsMode,
+		AllocGate: newAllocationGate(allocateGateInterval),
 	}
 
 	// Слушаем с retry (5 попыток по 1с) на случай если старый процесс
@@ -237,8 +258,11 @@ func (c *Core) Start(ctx context.Context) (<-chan Event, error) {
 		_ = uc.SetReadBuffer(socketBufSize)
 		_ = uc.SetWriteBuffer(socketBufSize)
 	}
-	stopLocalConn := context.AfterFunc(ctx, func() { _ = localConn.Close() })
-	defer stopLocalConn()
+	// Порт освобождаем сразу при отмене контекста, не дожидаясь завершения
+	// воркеров: иначе зависший teardown держит 127.0.0.1:9000, и следующее
+	// подключение уходит на динамический порт. AfterFunc нельзя снимать
+	// defer-ом — Start() возвращается сразу, и закрытие отменилось бы.
+	context.AfterFunc(ctx, func() { _ = localConn.Close() })
 
 	_, localPort, _ := net.SplitHostPort(localConn.LocalAddr().String())
 	if localPort == "" {
@@ -309,6 +333,8 @@ func (c *Core) Start(ctx context.Context) (<-chan Event, error) {
 	go stats.RunLoop(shutdownCh)
 
 	disp := NewDispatcher(ctx, localConn, stats)
+	c.disp = disp
+	c.startedAt = time.Now()
 
 	configCh := make(chan string, 1)
 	configDone := make(chan struct{})
@@ -333,6 +359,7 @@ func (c *Core) Start(ctx context.Context) (<-chan Event, error) {
 			if c.cfg.AutoWG {
 				if err := SetupWindowsWireGuard(finalConf, c.cfg.WGInterface, customDNS, c.cfg.ExcludeDomains); err != nil {
 					log.Printf("[CORE] WG setup error: %v", err)
+					c.emit(Event{Type: EventEvent, Name: "wg_failed", Data: err.Error()})
 					c.emit(Event{Type: EventError, Msg: err.Error()})
 					return
 				}
@@ -346,8 +373,15 @@ func (c *Core) Start(ctx context.Context) (<-chan Event, error) {
 			}
 		}
 
-		// Сначала пробуем кэш — если конфиг свежий, туннель поднимается мгновенно.
-		if cached, ok := c.wgCacheGet(); ok {
+		// Приоритет источников конфига:
+		//   1. кэш уровня бэкенда (переживает сессию, C2) — реконнект ~1с;
+		//   2. внутрисессионный кэш ядра (60с);
+		//   3. DTLS exchange с сервером.
+		if c.cfg.WGConfig != "" {
+			log.Printf("[CORE] WG конфиг из бэкенд-кэша — пропускаем DTLS exchange")
+			c.wgCachePut(c.cfg.WGConfig)
+			applyConfig(c.cfg.WGConfig, true)
+		} else if cached, ok := c.wgCacheGet(); ok {
 			log.Printf("[CORE] WG конфиг из кэша (%.0fs назад) — пропускаем DTLS exchange", time.Since(c.wgCacheAt).Seconds())
 			applyConfig(cached, true)
 		} else {
@@ -370,50 +404,59 @@ func (c *Core) Start(ctx context.Context) (<-chan Event, error) {
 		<-ctx.Done()
 	}()
 
-	var wg sync.WaitGroup
-	workerIDCounter := 1
-	var prevWaitReady <-chan struct{}
+	// Фабрика worker-слоя. Вынесена в замыкание, чтобы soft restart (C3)
+	// мог поднять новое поколение воркеров с теми же параметрами, не трогая
+	// WG-интерфейс, DNS-прокси и диспетчер.
+	c.workerLaunch = func(wctx context.Context, needConfig bool) {
+		var wg sync.WaitGroup
+		workerIDCounter := 1
+		var prevWaitReady <-chan struct{}
 
-	remaining := n
-	for g := 0; g < numGroups; g++ {
-		isFirst := g == 0
-		var myWaitReady <-chan struct{}
-		var mySignalReady chan<- struct{}
+		remaining := n
+		for g := 0; g < numGroups; g++ {
+			isFirst := g == 0
+			var myWaitReady <-chan struct{}
+			var mySignalReady chan<- struct{}
 
-		if g > 0 {
-			myWaitReady = prevWaitReady
-		}
-		if g < numGroups-1 {
-			ch := make(chan struct{})
-			mySignalReady = ch
-			prevWaitReady = ch
-		}
+			if g > 0 {
+				myWaitReady = prevWaitReady
+			}
+			if g < numGroups-1 {
+				ch := make(chan struct{})
+				mySignalReady = ch
+				prevWaitReady = ch
+			}
 
-		thisSize := workersPerGroup
-		if remaining < workersPerGroup {
-			thisSize = remaining
-		}
-		remaining -= thisSize
-		ids := make([]int, thisSize)
-		for i := range ids {
-			ids[i] = workerIDCounter
-			workerIDCounter++
-		}
+			thisSize := workersPerGroup
+			if remaining < workersPerGroup {
+				thisSize = remaining
+			}
+			remaining -= thisSize
+			ids := make([]int, thisSize)
+			for i := range ids {
+				ids[i] = workerIDCounter
+				workerIDCounter++
+			}
 
-		gID := g + 1
-		var cc chan<- string
-		if isFirst {
-			cc = configCh
-		}
+			gID := g + 1
+			var cc chan<- string
+			firstWithConfig := isFirst && needConfig
+			if firstWithConfig {
+				cc = configCh
+			}
 
-		wg.Add(1)
-		go func(groupID int, isFirstGroup bool, configChan chan<- string, workerIds []int, startHashIndex int, waitR <-chan struct{}, sigR chan<- struct{}) {
-			defer wg.Done()
-			WorkerGroup(ctx, groupID, startHashIndex, tp, peer, disp, localPort,
-				isFirstGroup, configChan, workerIds, &c.pauseFlag,
-				c.cfg.DeviceID, c.cfg.Password, stats, waitR, sigR)
-		}(gID, isFirst, cc, ids, g, myWaitReady, mySignalReady)
+			wg.Add(1)
+			go func(groupID int, isFirstGroup bool, configChan chan<- string, workerIds []int, startHashIndex int, waitR <-chan struct{}, sigR chan<- struct{}) {
+				defer wg.Done()
+				WorkerGroup(wctx, groupID, startHashIndex, tp, peer, disp, localPort,
+					isFirstGroup, configChan, workerIds, &c.pauseFlag,
+					c.cfg.DeviceID, c.cfg.Password, stats, waitR, sigR)
+			}(gID, firstWithConfig, cc, ids, g, myWaitReady, mySignalReady)
+		}
+		wg.Wait()
 	}
+
+	c.launchWorkerLayer(ctx, c.cfg.WGConfig == "")
 
 	go func() {
 		defer c.closeEvents()
@@ -421,7 +464,8 @@ func (c *Core) Start(ctx context.Context) (<-chan Event, error) {
 		defer func() { _ = localConn.Close() }()
 		defer disp.Shutdown()
 
-		wg.Wait()
+		<-ctx.Done()
+		c.stopWorkerLayer()
 		close(configCh)
 		<-configDone
 		c.emit(Event{Type: EventState, Status: "stopped"})
@@ -429,6 +473,86 @@ func (c *Core) Start(ctx context.Context) (<-chan Event, error) {
 	}()
 
 	return c.events, nil
+}
+
+// launchWorkerLayer запускает новое поколение воркеров. needConfig=true —
+// первый воркер запросит WG-конфиг через DTLS; при soft restart конфиг уже
+// известен и повторный GETCONF не нужен.
+func (c *Core) launchWorkerLayer(parent context.Context, needConfig bool) {
+	c.workerMu.Lock()
+	if c.workerLayer != nil || c.workerLaunch == nil {
+		c.workerMu.Unlock()
+		return
+	}
+	lctx, cancel := context.WithCancel(parent)
+	layer := &workerLayer{cancel: cancel, done: make(chan struct{})}
+	c.workerLayer = layer
+	gen := c.workerGen.Add(1)
+	launch := c.workerLaunch
+	c.workerMu.Unlock()
+
+	go func() {
+		defer close(layer.done)
+		launch(lctx, needConfig)
+		cancel()
+
+		c.workerMu.Lock()
+		current := c.workerLayer == layer
+		if current {
+			c.workerLayer = nil
+		}
+		c.workerMu.Unlock()
+
+		// Воркеры вышли сами (fatal auth, исчерпаны попытки), а не по Stop
+		// или soft restart — останавливаем ядро целиком.
+		if current && parent.Err() == nil && c.workerGen.Load() == gen {
+			log.Println("[CORE] все воркеры завершились — останавливаем ядро")
+			c.cancel()
+		}
+	}()
+}
+
+// RestartWorkers перезапускает только воркеров: WG-интерфейс, DNS-прокси,
+// диспетчер и локальный порт остаются поднятыми. Используется при обрыве
+// всех воркеров и смене сети (C3) — туннель не «прыгает» на 10-20 секунд.
+// Возвращает false, если воркеры уже не работают или ядро остановлено.
+func (c *Core) RestartWorkers() bool {
+	c.workerMu.Lock()
+	layer := c.workerLayer
+	launch := c.workerLaunch
+	if layer == nil || launch == nil || c.ctx == nil || c.ctx.Err() != nil {
+		c.workerMu.Unlock()
+		return false
+	}
+	c.workerLayer = nil
+	// Инвалидируем поколение: завершение старого слоя после cancel() не
+	// должно гасить ядро, пока поднимается новое.
+	c.workerGen.Add(1)
+	c.workerMu.Unlock()
+
+	log.Println("[CORE] Soft restart воркеров (WG/DNS остаются поднятыми)")
+	layer.cancel()
+	go func() {
+		<-layer.done
+		if c.ctx.Err() != nil {
+			return
+		}
+		c.launchWorkerLayer(c.ctx, false)
+	}()
+	return true
+}
+
+// stopWorkerLayer останавливает текущее поколение воркеров и ждёт его выхода.
+func (c *Core) stopWorkerLayer() {
+	c.workerMu.Lock()
+	layer := c.workerLayer
+	c.workerLayer = nil
+	c.workerMu.Unlock()
+	if layer == nil {
+		return
+	}
+	layer.cancel()
+	<-layer.done
 }
 
 // Stop останавливает ядро.
@@ -493,6 +617,17 @@ type Snapshot struct {
 	ActiveConnections int32
 	TotalBytesUp      int64
 	TotalBytesDown    int64
+
+	// WorkersTotal — сколько воркеров зарегистрировано в диспетчере.
+	// ActiveConnections — сколько из них сейчас с живой DTLS-сессией.
+	WorkersTotal int32
+	// AvgRTTMillis — средний EWMA RTT активных проб (0 — данных ещё нет).
+	AvgRTTMillis float64
+	// UptimeSeconds — сколько живёт текущее ядро.
+	UptimeSeconds int64
+	// DNSResponses/DNSFailures — глобальные счётчики локального DNS-прокси.
+	DNSResponses uint64
+	DNSFailures  uint64
 }
 
 // Stats возвращает текущий снимок (для UI). Безопасно для вызова до Start()
@@ -501,11 +636,21 @@ func (c *Core) Stats() Snapshot {
 	if c.stats == nil {
 		return Snapshot{}
 	}
-	return Snapshot{
+	snap := Snapshot{
 		ActiveConnections: atomic.LoadInt32(&c.stats.ActiveConnections),
 		TotalBytesUp:      atomic.LoadInt64(&c.stats.TotalBytesUp),
 		TotalBytesDown:    atomic.LoadInt64(&c.stats.TotalBytesDown),
+		DNSResponses:      dnsTotalResponses.Load(),
+		DNSFailures:       dnsTotalFailures.Load(),
 	}
+	if c.disp != nil {
+		snap.WorkersTotal = int32(c.disp.WorkersTotal())
+		snap.AvgRTTMillis = c.disp.AvgRTT()
+	}
+	if !c.startedAt.IsZero() {
+		snap.UptimeSeconds = int64(time.Since(c.startedAt).Seconds())
+	}
+	return snap
 }
 
 // closeEvents закрывает канал событий ровно один раз и блокирует дальнейшие emit.

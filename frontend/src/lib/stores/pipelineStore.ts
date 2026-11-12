@@ -76,13 +76,29 @@ export const pipelineStore = {
     notify();
   },
 
+  // Скрывает схему, но оставляет её на экране, если подключение упало:
+  // иначе пользователь не увидит, на каком этапе и почему произошла ошибка.
+  hideUnlessFailed: () => {
+    if (state.failed) return;
+    state = { ...state, visible: false };
+    notify();
+  },
+
   setFromBackend: (payload: PipelineState) => {
     state = { ...payload };
     notify();
   },
 
   getStepsToShow: (s: PipelineState): ConnectionStep[] => {
-    const base: ConnectionStep[] = ['dns', 'vk', 'wrap', 'turn', 'dtls', 'workers', 'wg'];
+    // «Капча» появляется в схеме только когда она реально задействована,
+    // иначе список прыгает и сдвигает остальные этапы.
+    const captchaRelevant =
+      s.completed.includes('captcha') ||
+      s.current === 'captcha' ||
+      s.failed === 'captcha';
+    const base: ConnectionStep[] = captchaRelevant
+      ? ['dns', 'vk', 'captcha', 'wrap', 'turn', 'dtls', 'workers', 'wg']
+      : ['dns', 'vk', 'wrap', 'turn', 'dtls', 'workers', 'wg'];
     if (s.completed.includes('done') || s.current === 'done') return [...base, 'done'];
     return base;
   },

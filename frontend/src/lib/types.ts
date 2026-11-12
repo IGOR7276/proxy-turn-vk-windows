@@ -23,7 +23,6 @@ export const FINGERPRINT_OPTIONS: Fingerprint[] = ['chrome', 'safari', 'ios', 'a
 export const OBFS_MODE_OPTIONS: ObfsMode[] = ['audio', 'video'];
 
 export interface AppSettings {
-  bypassMode: 'РУЧ' | 'АВТ';
   power: number;
   mtu: number;
   tray: boolean;
@@ -42,9 +41,55 @@ export interface AppSettings {
   closeAction: CloseAction;     // действие при нажатии X (default 'ask' = показать диалог)
   obfsMode: ObfsMode;           // режим маскировки RTP: audio (OPUS/PT111) или video (H264/PT96)
   autoReconnect: boolean;       // автоматически переподключаться после обрыва (default true)
+
+  // Поля, которыми владеет только бэкенд (Q1): фронтенд их не редактирует,
+  // но обязан сохранять при отправке настроек обратно.
+  captchaMode?: string;
+  vkAuthMode?: string;
+  updateChannel?: string;
+  selectedServer?: string;
+  schemaVersion?: number;
 }
 
-export type TunnelState = 'idle' | 'connecting' | 'reconnecting' | 'connected' | 'disconnecting';
+// Dashboard — снимок рантайма из бэкенда (событие "stats" / GetDashboard).
+export interface Dashboard {
+  state: string;
+  workersAlive: number;
+  workersTotal: number;
+  speedRx: number;    // байт/с
+  speedTx: number;    // байт/с
+  totalRx: number;    // байт с начала сессии
+  totalTx: number;
+  avgRttMs: number;
+  uptimeSec: number;
+  reconnects: number;
+  lastError: string;
+  dnsResponses: number;
+  dnsFailures: number;
+  updatedAt: number;
+}
+
+export interface ConnectionCheck {
+  ok: boolean;
+  workersAlive: number;
+  latencyMs: number;
+  resolved: number;
+  error: string;
+  checkedAt: number;
+}
+
+// AppState — полный снимок бэкенда для первичной гидратации (Q1).
+export interface AppState {
+  settings: AppSettings;
+  servers: Server[];
+  selectedServer: string;
+  deploy: DeployConfig;
+  dashboard: Dashboard;
+  version: string;
+  legacyMigrationPending: boolean;
+}
+
+export type TunnelState = 'idle' | 'connecting' | 'reconnecting' | 'connected' | 'degraded' | 'disconnecting';
 
 export interface Subscription {
   id: string;
@@ -82,7 +127,6 @@ export const DEFAULT_DEPLOY: DeployConfig = {
 export type DeployState = 'idle' | 'deploying' | 'removing';
 
 export const DEFAULT_SETTINGS: AppSettings = {
-  bypassMode: 'АВТ',
   power: 9,
   mtu: 1280,
   tray: true,

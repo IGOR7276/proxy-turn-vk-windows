@@ -1,11 +1,11 @@
 import { useState, useEffect } from 'react';
-import { IconSettings2, IconServer2, IconWorld, IconShield, IconSun, IconMoon, IconRotate, IconKey, IconAlertTriangle, IconX, IconBrandVk } from '@tabler/icons-react';
+import { IconSettings2, IconServer2, IconWorld, IconSun, IconMoon, IconRotate, IconKey, IconAlertTriangle, IconX, IconBrandVk } from '@tabler/icons-react';
 import { settingsStore } from '../lib/store';
 import { tunnelStore } from '../lib/stores/tunnelStore';
 import { themeStore } from '../lib/stores/themeStore';
 import { toastStore } from '../lib/stores/toastStore';
 import type { AppSettings } from '../lib/types';
-import { DNS_PRESETS, FINGERPRINT_OPTIONS } from '../lib/types';
+import { DNS_PRESETS, FINGERPRINT_OPTIONS, OBFS_MODE_OPTIONS } from '../lib/types';
 import { SetTrayEnabled, SetAutoStart, GetAutoStart, SetCloseActionPreference, SetVkAuthMode, GetVkAuthMode } from '../../wailsjs/go/backend/App';
 
 function extractHashInput(raw: string): string {
@@ -63,7 +63,7 @@ export default function Settings() {
     }
   };
 
-  const locked = tunnelState === 'connected' || tunnelState === 'connecting' || tunnelState === 'reconnecting';
+  const locked = tunnelState === 'connected' || tunnelState === 'connecting' || tunnelState === 'reconnecting' || tunnelState === 'degraded';
 
   const update = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => {
     setSettings(s => {
@@ -145,25 +145,6 @@ export default function Settings() {
             <span className="sp-label">
               <span className="sp-label-main">
                 <IconRotate size={16} />
-                Режим обхода
-              </span>
-            </span>
-            <div className="sp-seg">
-              <button
-                className={`sp-seg-btn${settings.bypassMode === 'АВТ' ? ' sp-seg-btn--active' : ''}`}
-                onClick={() => update('bypassMode', 'АВТ')}
-              >АВТ</button>
-              <button
-                className={`sp-seg-btn${settings.bypassMode === 'РУЧ' ? ' sp-seg-btn--active' : ''}`}
-                onClick={() => update('bypassMode', 'РУЧ')}
-              >РУЧ</button>
-            </div>
-          </div>
-
-          <div className="sp-row">
-            <span className="sp-label">
-              <span className="sp-label-main">
-                <IconRotate size={16} />
                 Fingerprint
               </span>
             </span>
@@ -184,10 +165,18 @@ export default function Settings() {
                 <IconRotate size={16} />
                 Маскировка трафика
               </span>
-              <span className="sp-label-sub">RTP payload type 111 (OPUS audio)</span>
+              <span className="sp-label-sub">
+                {settings.obfsMode === 'video' ? 'RTP payload type 96 (H264 video)' : 'RTP payload type 111 (OPUS audio)'}
+              </span>
             </span>
             <div className="sp-seg">
-              <button className="sp-seg-btn sp-seg-btn--active">Аудио</button>
+              {OBFS_MODE_OPTIONS.map(mode => (
+                <button
+                  key={mode}
+                  className={`sp-seg-btn${settings.obfsMode === mode ? ' sp-seg-btn--active' : ''}`}
+                  onClick={() => update('obfsMode', mode)}
+                >{mode === 'video' ? 'Видео' : 'Аудио'}</button>
+              ))}
             </div>
           </div>
 
@@ -282,20 +271,6 @@ export default function Settings() {
               />
             </div>
           )}
-
-          <div className={`sp-row${locked ? ' sp-row-locked' : ''}`}>
-            <span className="sp-label">
-              <span className="sp-label-main">
-                <IconShield size={16} />
-                Авто-WireGuard
-              </span>
-              <span className="sp-label-sub">поднимать Windows WG интерфейс</span>
-            </span>
-            <button
-              className={`sp-toggle${settings.autoWG ? ' sp-toggle--on' : ''}`}
-              onClick={() => update('autoWG', !settings.autoWG)}
-            />
-          </div>
 
           <div className="sp-row">
             <span className="sp-label">

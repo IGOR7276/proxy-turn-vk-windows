@@ -19,24 +19,18 @@ import (
 )
 
 const (
-	workerSendBuf      = 128
-	sessionReadTimeout = 30 * time.Minute // долгий простой не должен убивать сессию
-	readBufSize        = 1600
-	socketBufSize      = 625 * 1024
-	keepaliveByte      = 0xFF // DTLS-level keepalive marker
-	keepaliveInterval  = 10 * time.Second
+	workerSendBuf        = 128
+	sessionReadTimeout   = 30 * time.Minute // долгий простой не должен убивать сессию
+	readBufSize          = 1600
+	socketBufSize        = 625 * 1024
+	keepaliveByte        = 0xFF // DTLS-level keepalive marker
+	keepaliveInterval    = 10 * time.Second
 	dtlsHandshakeTimeout = 20 * time.Second // медленный WG успеет договориться
 
-	// sessionDeadAfter — если за это время через DTLS не пришло НИ ОДНОГО
-	// пакета (ни данных, ни pong на keepalive), сессия считается мёртвой и
-	// закрывается, чтобы воркер переподключился (новый TURN allocate + DTLS).
-	//
-	// Без этого после обрыва сети / смены Wi-Fi / сна ноутбука сессия висела
-	// «живой» до sessionReadTimeout (30 минут): UDP-запись в никуда не
-	// возвращает ошибку, а TURN-аллокация после смены NAT-маппинга мертва.
-	// Диспетчер продолжал раскидывать пакеты по зомби-воркерам → туннель
-	// не работал, хотя UI показывал «подключено».
-	sessionDeadAfter = 45 * time.Second
+	// dtlsMTU совпадает с MTU сервера (1100): иначе клиентские handshake-флайты
+	// больше, чем сервер готов собрать, и рукопожатие уходит в таймаут.
+	// На передачу данных MTU в pion не влияет — только на фрагментацию handshake.
+	dtlsMTU = 1100
 
 	// configRequestAttempts — сколько раз одна сессия пробует GETCONF, прежде
 	// чем отдать право запроса другому воркеру.
@@ -180,6 +174,14 @@ func RunSession(
 			continue
 		}
 
+		// Разносим Allocate во времени: квота VK общая на аккаунт/IP, и
+		// одновременный Allocate десятков воркеров гарантирует 486.
+		if err = tp.AllocGate.Wait(ctx); err != nil {
+			tc.Close()
+			_ = c.Close()
+			return false, err
+		}
+
 		relay, err = tc.Allocate()
 		if err != nil {
 			tc.Close()
@@ -188,8 +190,8 @@ func RunSession(
 				handleAuthError(creds.CacheStreamID)
 			}
 			errStr := err.Error()
-			if strings.Contains(errStr, "Quota") || strings.Contains(errStr, "486") {
-				return false, fmt.Errorf("TURN квота: %w", err)
+			if strings.Contains(errStr, "Quota") || strings.Contains(errStr, "error 486") {
+				return false, fmt.Errorf("%w: %v", ErrTurnQuota, err)
 			}
 			turnErr = err
 			continue
@@ -273,6 +275,7 @@ func RunSession(
 		readBufLen := readBufSize + 80
 		buf := make([]byte, readBufLen)
 		plain := make([]byte, readBufSize)
+		var replay replayWindow
 		for {
 			n, _, readErr := relay.ReadFrom(buf)
 			if readErr != nil {
@@ -290,6 +293,11 @@ func RunSession(
 				m, wrapErr := obfsUnwrapPacket(tp.WrapKey, payload, plain)
 				if wrapErr != nil {
 					log.Printf("[СЕССИЯ #%d] OBFS unwrap: %v (n=%d)", sessionID, wrapErr, n)
+					continue
+				}
+				// Повтор отбрасываем после успешного unwrap: мусорные пакеты
+				// не должны раздувать состояние окна.
+				if !replay.accept(payload) {
 					continue
 				}
 				payload = plain[:m]
@@ -349,6 +357,7 @@ func RunSession(
 		ExtendedMasterSecret:  dtls.RequireExtendedMasterSecret,
 		CipherSuites:          []dtls.CipherSuiteID{dtls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256},
 		ConnectionIDGenerator: dtls.OnlySendCIDGenerator(),
+		MTU:                   dtlsMTU,
 		// No ServerName (SNI) — less detectable by DPI
 	}
 
@@ -422,6 +431,11 @@ func RunSession(
 		if !configDelivered {
 			log.Printf("[ВОРКЕР #%d] Конфиг не получен, право запроса передано другим воркерам", sessionID)
 		}
+	} else {
+		if authErr := SendAuth(dtlsConn, deviceID, password); authErr != nil {
+			log.Printf("[ВОРКЕР #%d] Ошибка авторизации: %v", sessionID, authErr)
+			return false, authErr
+		}
 	}
 
 	log.Printf("[ВОРКЕР #%d] [READY] Туннель готов к работе ✓", sessionID)
@@ -445,13 +459,22 @@ func RunSession(
 	defer stopDTLS()
 
 	// lastRx — unix-nano последнего пакета, полученного через DTLS (данные
-	// или pong). Обновляется Reader'ом, проверяется keepalive-горутиной.
+	// или pong). Обновляется Reader'ом, используется для статистики/RTT.
 	var lastRx atomic.Int64
 	lastRx.Store(time.Now().UnixNano())
 
-	// DTLS Keepalive + liveness: шлём ping, и если ответов (или любых других
-	// пакетов) нет дольше sessionDeadAfter — закрываем сессию. Воркер
-	// переподключится с новой TURN-аллокацией.
+	// DTLS Keepalive: шлём ping каждые keepaliveInterval. Сессия считается
+	// мёртвой ТОЛЬКО при ошибке keepalive write (транспорт реально сломался —
+	// UDP-сокет достал ICMP unreachable и т.п.) либо при ошибке Reader/Writer.
+	//
+	// Проверку «тишина дольше N → сессия мёртва» делать здесь НЕ нужно:
+	// сервер не шлёт клиенту ответов на keepalive-пинг (он лишь сбрасывает
+	// свой idle-таймер при их получении), а туннель без медиа-трафика
+	// (пользователь не в звонке) вообще не генерирует входящих пакетов.
+	// Счётчик тишины простоя ложно срабатывал уже через ~20с после
+	// рукопожатия — и вызывал ложный churn воркеров при каждом старте.
+	// Смерть сессии при реальной потере сети теперь ловится через ошибку
+	// записи keepalive (write error) и ошибки Read/Write контуров.
 	go func() {
 		defer proxyWg.Done()
 		t := time.NewTicker(keepaliveInterval)
@@ -462,13 +485,15 @@ func RunSession(
 			case <-sessCtx.Done():
 				return
 			case <-t.C:
-				silent := time.Since(time.Unix(0, lastRx.Load()))
-				if silent > sessionDeadAfter {
-					log.Printf("[ВОРКЕР #%d] Нет ответа от сервера %.0fs — сессия мертва, переподключаемся", sessionID, silent.Seconds())
-					emitEvent(Event{Type: EventEvent, Name: "session_dead", Data: fmt.Sprintf("worker=%d silent=%.0fs", sessionID, silent.Seconds())})
-					sessCancel()
-					return
+				// C6: предыдущая проба не подтвердилась pong'ом — потеря.
+				// Health воркера снизится, планировщик начнёт обходить его.
+				if slot.pending.Swap(false) {
+					slot.probesBad.Add(1)
+					slot.recordProbeLost()
 				}
+				slot.lastProbe.Store(time.Now().UnixNano())
+				slot.pending.Store(true)
+
 				_ = dtlsConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 				if _, err := dtlsConn.Write(ping); err != nil {
 					log.Printf("[ВОРКЕР #%d] Keepalive write failed: %v, closing session", sessionID, err)
@@ -491,7 +516,9 @@ func RunSession(
 				if !ok {
 					return
 				}
-				_ = dtlsConn.SetWriteDeadline(time.Now().Add(sessionReadTimeout))
+				// Write не должен висеть дольше пары keepalive-интервалов:
+				// иначе зависшая UDP-запись блокирует Writer на минуты.
+				_ = dtlsConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 				_, writeErr := dtlsConn.Write(pkt)
 				putPktBuf(pkt)
 				if writeErr != nil {
@@ -523,9 +550,17 @@ func RunSession(
 			}
 
 			lastRx.Store(time.Now().UnixNano())
+			slot.lastRx.Store(time.Now().UnixNano())
 
-			// Skip keepalive pong from server
+			// Skip keepalive pong from server. Pong также даёт RTT-пробу.
 			if n == 1 && pkt[0] == keepaliveByte {
+				if slot.pending.Swap(false) {
+					if sent := slot.lastProbe.Load(); sent > 0 {
+						slot.observeRTT(time.Since(time.Unix(0, sent)))
+					}
+					slot.probesOK.Add(1)
+					slot.recordProbeOK()
+				}
 				putPktBuf(pkt)
 				continue
 			}
@@ -536,6 +571,14 @@ func RunSession(
 			case <-sessCtx.Done():
 				putPktBuf(pkt)
 				return
+			default:
+				// writeLoop не успевает отдавать пакеты в локальный сокет
+				// (backpressure WG/Windows). Блокироваться здесь нельзя:
+				// один медленный syscall иначе останавливает Reader'ы всех
+				// воркеров и вешает весь пул.
+				putPktBuf(pkt)
+				d.noteReturnDrop()
+				continue
 			}
 		}
 	}()

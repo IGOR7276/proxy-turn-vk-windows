@@ -182,7 +182,7 @@ func (a *App) FetchVkTurnCredentials(token, hash, deviceID string) error {
 	log.Printf("[VK Auth] Fetching TURN creds for hash %s...", shortHash(hash))
 	user, pass, urls, err := fetchVkTurnCreds(token, hash, deviceID)
 	if err != nil {
-		runtime.EventsEmit(a.ctx, "log", "ERROR", fmt.Sprintf("[VK Auth] %v", err))
+		emitLogEvent(a.ctx, "ERROR", fmt.Sprintf("[VK Auth] %v", err))
 		return err
 	}
 
@@ -192,7 +192,7 @@ func (a *App) FetchVkTurnCredentials(token, hash, deviceID string) error {
 	payload := fmt.Sprintf("%s|%s", hash, b64)
 
 	runtime.EventsEmit(a.ctx, "vk_turn_creds", payload)
-	runtime.EventsEmit(a.ctx, "log", "INFO", fmt.Sprintf("[VK Auth] TURN креды получены ✓ (urls=%d)", len(urls)))
+	emitLogEvent(a.ctx, "INFO", fmt.Sprintf("[VK Auth] TURN креды получены ✓ (urls=%d)", len(urls)))
 
 	if a.orch != nil {
 		a.orch.SendTurnCreds(payload)

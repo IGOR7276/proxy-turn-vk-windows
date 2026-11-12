@@ -13,7 +13,7 @@ export default function VkLogin({ onClose }: VkLoginProps) {
   const done = useRef(false);
 
   useEffect(() => {
-    BackendVkLogin().catch((err: any) => {
+    BackendVkLogin().catch((err: unknown) => {
       if (!done.current) {
         done.current = true;
         setStatus('error');

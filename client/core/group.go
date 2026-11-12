@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math/rand"
@@ -46,6 +47,19 @@ func WorkerGroup(
 		}
 	}
 
+	// Передаём эстафету следующей группе ровно один раз: либо с задержкой
+	// после получения кредов, либо сразу, если группа завершилась раньше.
+	// Без второго пути упавшая на кредах группа держала бы следующую до
+	// отмены контекста, и старт пула просто не начинался бы.
+	var signalOnce sync.Once
+	signalNext := func() {
+		if signalReady == nil {
+			return
+		}
+		signalOnce.Do(func() { close(signalReady) })
+	}
+	defer signalNext()
+
 	var configSent int32
 	if !getConfig {
 		configSent = 1
@@ -66,7 +80,12 @@ func WorkerGroup(
 	}
 	log.Printf("[ГРУППА #%d] Запрос кредов (хеш: %s...)", groupID, shortHash)
 
-	credStreamID := groupID * 100
+	// Stream ID = groupID, поэтому getCacheID() группирует по 10 групп на
+	// один набор кредов. Раньше groupID*100 давал каждой группе собственный
+	// кэш: все группы по очереди (3–6 с, с троттлингом VK) ходили за кредами,
+	// и старт растягивался на десятки секунд.
+	credStreamID := groupID
+	credCache := getStreamCache(credStreamID)
 	var creds *Credentials
 
 	// Retry-цикл: при получении капчи VK требует подождать ~60 секунд перед
@@ -157,13 +176,15 @@ func WorkerGroup(
 		return true
 	}
 
-	// Сигнализируем следующей группе, что мы успешно запустились (креды получены + 2 сек форы)
+	// Креды получены — даём следующей группе фору 0.5–0.75 с, чтобы воркеры
+	// успели начать Allocate и не устроили одновременный шторм 486.
 	if signalReady != nil {
 		go func() {
+			delay := 500*time.Millisecond + time.Duration(rand.Intn(250))*time.Millisecond
 			select {
-			case <-time.After(2000 * time.Millisecond):
+			case <-time.After(delay):
 				if ctx.Err() == nil {
-					close(signalReady)
+					signalNext()
 					log.Printf("[ГРУППА #%d] Успешный старт! Передача эстафеты следующей группе...", groupID)
 				}
 			case <-ctx.Done():
@@ -174,8 +195,9 @@ func WorkerGroup(
 	for i, wid := range workerIDs {
 		wg.Add(1)
 
-		// Stagger: 500мс между воркерами
-		workerDelay := time.Duration(i) * 500 * time.Millisecond
+		// Stagger: 75мс между воркерами. При 9 воркерах это 0.6 с вместо 4 с;
+		// общий лимит Allocate защищает от квоты.
+		workerDelay := time.Duration(i) * 75 * time.Millisecond
 
 		go func(wid int, delay time.Duration) {
 			defer wg.Done()
@@ -194,6 +216,19 @@ func WorkerGroup(
 			for {
 				if ctx.Err() != nil {
 					return
+				}
+
+				// Квота VK общая для всех воркеров с этими кредами: если один
+				// получил 486, остальные тоже ждут, а не долбят Allocate.
+				if wait := credCache.quotaRemaining(); wait > 0 {
+					log.Printf("[ВОРКЕР #%d] [TURN] Квота VK: жду %v до следующей попытки Allocate", wid, wait.Truncate(time.Second))
+					t := time.NewTimer(wait)
+					select {
+					case <-t.C:
+					case <-ctx.Done():
+						t.Stop()
+						return
+					}
 				}
 
 				getConf := false
@@ -235,6 +270,7 @@ func WorkerGroup(
 					attempt = 0
 				}
 
+				isQuota := false
 				if sessErr != nil {
 					if ctx.Err() != nil {
 						return
@@ -244,23 +280,30 @@ func WorkerGroup(
 
 					turnAllocAttrMissing := strings.Contains(errStrLower, "turn allocate") &&
 						strings.Contains(errStrLower, "attribute not found")
+					// 486 — квота VK на аккаунт/IP. Обновление кредов её не
+					// лечит, поэтому quota исключён из refresh и обрабатывается
+					// отдельным cooldown'ом.
+					isQuota = errors.Is(sessErr, ErrTurnQuota) ||
+						strings.Contains(errStrLower, "quota") ||
+						strings.Contains(errStrLower, "квота") ||
+						strings.Contains(errStrLower, "error 486")
 					// pion отдаёт отказ в авторизации как
 					// "Allocate error response (error 401: Unauthorized)" — после
 					// сна / смены сети креды протухают именно так. Без этого
 					// паттерна креды не обновлялись никогда, и воркеры бесконечно
 					// ретраили с мёртвыми.
-					turnCredRefreshNeeded := turnAllocAttrMissing ||
+					turnCredRefreshNeeded := !isQuota && (turnAllocAttrMissing ||
 						strings.Contains(errStrLower, "error 401") ||
 						strings.Contains(errStrLower, "unauthorized") ||
 						strings.Contains(errStrLower, "turn allocate auth") ||
 						strings.Contains(errStrLower, "invalid credential") ||
 						strings.Contains(errStrLower, "stale nonce") ||
 						strings.Contains(errStrLower, "allocation mismatch") ||
-						strings.Contains(errStrLower, "error 508") ||
-						strings.Contains(errStrLower, "turn квота") ||
-						strings.Contains(errStrLower, "quota")
+						strings.Contains(errStrLower, "error 508"))
 
-					if strings.Contains(errStrLower, "rate limit") ||
+					if hint := workerErrorHint(sessErr); hint != "" {
+						errStr += " | " + hint
+					} else if strings.Contains(errStrLower, "rate limit") ||
 						strings.Contains(errStrLower, "flood control") ||
 						strings.Contains(errStrLower, "ip mismatch") ||
 						strings.Contains(errStrLower, "error 29") {
@@ -274,7 +317,11 @@ func WorkerGroup(
 					}
 
 					attempt++
-					if turnAllocAttrMissing {
+					if isQuota {
+						cooldown := 30*time.Second + time.Duration(rand.Intn(31))*time.Second
+						credCache.setQuotaCooldown(cooldown)
+						log.Printf("[ВОРКЕР #%d] [TURN] Квота relay исчерпана, пауза %v (креды не обновляем): %s", wid, cooldown.Truncate(time.Second), errStr)
+					} else if turnAllocAttrMissing {
 						log.Printf("[ВОРКЕР #%d] [TURN] Allocate вернул неполный ответ, обновляем TURN-креды и повторяем (попытка %d): %s", wid, attempt, errStr)
 						refreshCreds("TURN Allocate attribute-not-found")
 					} else if turnCredRefreshNeeded {
@@ -307,6 +354,11 @@ func WorkerGroup(
 					base = 30
 				}
 				retryDelay := time.Duration(base)*time.Second + time.Duration(rand.Intn(3))*time.Second
+				if isQuota {
+					// Основная пауза — cooldown кэша (30–60 с); здесь только
+					// разброс, чтобы воркеры не проснулись одновременно.
+					retryDelay = time.Duration(rand.Intn(3)) * time.Second
+				}
 				select {
 				case <-time.After(retryDelay):
 				case <-ctx.Done():
@@ -410,6 +462,8 @@ type TurnParams struct {
 	Hashes   []string
 	WrapKey  []byte // Password-derived WRAP key (32 bytes), nil = disabled
 	ObfsMode string // "audio" or "video" — RTP masking mode
+	// AllocGate ограничивает частоту TURN Allocate между воркерами ядра.
+	AllocGate *allocationGate
 }
 
 // Credentials — учетные данные TURN

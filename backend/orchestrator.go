@@ -18,6 +18,10 @@ import (
 	"wg-turn-client/core"
 )
 
+// logWriterActive — true, пока log.SetOutput направлен в wailsLogWriter.
+// Нужен, чтобы не дублировать строки, которые уже идут батчем в UI.
+var logWriterActive atomic.Bool
+
 // wailsLogWriter перехватывает log.Printf и направляет в Wails-события.
 // Параллельно пишет полный лог в файл <config>/wdtt/logs/<session>.log.
 // Буферизует UI-записи и флашит каждые 100ms чтобы не блокировать core.
@@ -29,7 +33,7 @@ type wailsLogWriter struct {
 	file *os.File
 }
 
-type logEntry struct{ level, msg string }
+type logEntry struct{ level, msg, time string }
 
 const maxLogBuf = 500
 
@@ -73,9 +77,17 @@ func (w *wailsLogWriter) flush() {
 	batch := w.buf
 	w.buf = nil
 	w.mu.Unlock()
+
+	// U8: одно событие на весь батч вместо N отдельных "log". При активном
+	// туннеле это сотни строк в секунду — по событию на строку WebView
+	// захлёбывался, а UI-поток тратил время на диспетчеризацию.
+	records := make([]LogRecord, 0, len(batch))
 	for _, e := range batch {
-		runtime.EventsEmit(w.ctx, "log", e.level, e.msg)
+		rec := LogRecord{Level: e.level, Msg: e.msg, Time: e.time}
+		records = append(records, rec)
+		appendLogRing(rec)
 	}
+	runtime.EventsEmit(w.ctx, "logs_batch", records)
 }
 
 func (w *wailsLogWriter) Write(p []byte) (int, error) {
@@ -96,7 +108,7 @@ func (w *wailsLogWriter) Write(p []byte) (int, error) {
 	if len(w.buf) >= maxLogBuf {
 		w.buf = w.buf[1:]
 	}
-	w.buf = append(w.buf, logEntry{level, msg})
+	w.buf = append(w.buf, logEntry{level, msg, time.Now().Format("15:04:05")})
 	w.mu.Unlock()
 	return len(p), nil
 }
@@ -226,6 +238,7 @@ func loadProfile(name string) (*ProfileData, error) {
 	if err := json.Unmarshal(data, &p); err != nil {
 		return nil, fmt.Errorf("profile %q parse: %w", name, err)
 	}
+	unprotectProfile(&p)
 	return &p, nil
 }
 
@@ -241,6 +254,49 @@ type coreSession struct {
 	fatal       atomic.Bool   // фатальная ошибка авторизации — не переподключаемся
 	wasUp       atomic.Bool   // туннель хотя бы раз дошёл до wg_up
 	upAt        atomic.Int64  // unix-время wg_up (для сброса backoff)
+
+	wgKey        string      // ключ кэша WG-конфига (профиль|пароль|device)
+	usedCachedWG atomic.Bool // WG поднят из кэша бэкенда (при ошибке — инвалидируем)
+	lastNetRestart atomic.Int64 // unix-время последнего рестарта из-за смены сети
+}
+
+// wgCacheGet возвращает свежий WG-конфиг для ключа или "".
+func (o *Orchestrator) wgCacheGet(key string) string {
+	if key == "" {
+		return ""
+	}
+	o.wgMu.Lock()
+	defer o.wgMu.Unlock()
+	if o.wgConf == "" || o.wgKey != key {
+		return ""
+	}
+	if time.Since(o.wgAt) > backendWGConfigTTL {
+		return ""
+	}
+	return o.wgConf
+}
+
+// wgCachePut сохраняет WG-конфиг, полученный от сервера.
+func (o *Orchestrator) wgCachePut(key, conf string) {
+	if key == "" || conf == "" {
+		return
+	}
+	o.wgMu.Lock()
+	defer o.wgMu.Unlock()
+	o.wgKey = key
+	o.wgConf = conf
+	o.wgAt = time.Now()
+}
+
+// wgCacheInvalidate сбрасывает кэш (например, WG не поднялся с этим конфигом).
+func (o *Orchestrator) wgCacheInvalidate(key string) {
+	o.wgMu.Lock()
+	defer o.wgMu.Unlock()
+	if key == "" || o.wgKey == key {
+		o.wgKey = ""
+		o.wgConf = ""
+		o.wgAt = time.Time{}
+	}
 }
 
 // connectionStep — этапы подключения, отслеживаемые pipeline.
@@ -334,6 +390,11 @@ func (pc *pipelineController) setCurrent(appCtx context.Context, step connection
 		pc.mu.Unlock()
 		return
 	}
+	// Уходим с этапа капчи — считаем его пройденным, иначе он пропадёт
+	// из схемы на фронте и список этапов «прыгнет».
+	if pc.state.Current == stepCaptcha && !pc.isCompletedLocked(stepCaptcha) {
+		pc.state.Completed = append(pc.state.Completed, string(stepCaptcha))
+	}
 	pc.state.Current = step
 	pc.state.TimedOut = false
 	pc.armTimeoutLocked(appCtx, step)
@@ -385,7 +446,7 @@ func (pc *pipelineController) failLocked(appCtx context.Context, step connection
 	pc.stopTimerLocked()
 	pc.mu.Unlock()
 	pc.emitState(appCtx)
-	runtime.EventsEmit(appCtx, "log", "ERROR", fmt.Sprintf("[СХЕМА] Ошибка на этапе %s: %s", step, reason))
+	emitLogEvent(appCtx, "ERROR", fmt.Sprintf("[СХЕМА] Ошибка на этапе %s: %s", step, reason))
 	go pc.stopFunc()
 }
 
@@ -478,6 +539,22 @@ type Orchestrator struct {
 	reconnectTimer   *time.Timer
 	reconnectPending bool
 	reconnectAttempt int
+
+	// Кэш WG-конфига на уровне бэкенда (C2). Переживает сессию: при
+	// переподключении того же профиля конфиг поднимается сразу, без
+	// DTLS exchange и GETCONF. Ключ — профиль + пароль + device ID.
+	wgMu   sync.Mutex
+	wgKey  string
+	wgConf string
+	wgAt   time.Time
+
+	// Состояние для live-дашборда (U1). Единственный источник правды:
+	// UI только читает эти значения через GetDashboard/событие stats.
+	state      atomic.Value // string: idle/connecting/connected/degraded/reconnecting/disconnected
+	reconnects atomic.Int64
+	lastErr    atomic.Value // string: последняя ошибка ("" — ошибок нет)
+	speedRx    atomic.Int64 // байт/с, считается dashboardLoop
+	speedTx    atomic.Int64
 }
 
 // Параметры backoff автопереподключения.
@@ -499,10 +576,28 @@ const (
 	// Если воркеры восстанавливаются сами (обычно за 5–15 с) — не мешаем.
 	tunnelDownRestartAfter = 30 * time.Second
 	watchdogInterval       = 2 * time.Second
+
+	// workerDegradedAfter — через сколько секунд без единого живого воркера
+	// показываем в UI состояние degraded (туннель ещё поднят, но трафика нет).
+	workerDegradedAfter = 5 * time.Second
+	// workerSoftRestartAfter — через сколько секунд без воркеров пробуем
+	// мягкий перезапуск только воркеров (WG/DNS/маршруты не трогаем).
+	workerSoftRestartAfter = 15 * time.Second
+
+	// backendWGConfigTTL — сколько живёт WG-конфиг в кэше бэкенда. Ключи и
+	// адрес устройства стабильны, но сервер может их ротировать; при ошибке
+	// WG кэш инвалидируется досрочно.
+	backendWGConfigTTL = 30 * time.Minute
 )
 
 func NewOrchestrator(ctx context.Context, onTray func(bool, int64, int64, int32)) *Orchestrator {
-	return &Orchestrator{appCtx: ctx, onTray: onTray}
+	o := &Orchestrator{appCtx: ctx, onTray: onTray}
+	o.state.Store("idle")
+	o.lastErr.Store("")
+	// Дашборд тикает всегда, даже без сессии: UI получает нули и «idle»,
+	// а не замирает на последнем значении.
+	go o.dashboardLoop()
+	return o
 }
 
 // Start запускает сессию по кнопке пользователя. Возвращает ошибку, если уже запущена.
@@ -548,6 +643,7 @@ func (o *Orchestrator) launch(p ConnectParams, isReconnect bool) (*coreSession, 
 	lw := &wailsLogWriter{ctx: o.appCtx, file: newSessionLogFile(p.Profile)}
 	lw.start()
 	log.SetOutput(lw)
+	logWriterActive.Store(true)
 
 	var prof *ProfileData
 	if p.PeerAddr != "" {
@@ -612,6 +708,11 @@ func (o *Orchestrator) launch(p ConnectParams, isReconnect bool) (*coreSession, 
 		deviceID = localDeviceID()
 	}
 
+	// Ключ кэша WG-конфига: профиль + пароль + устройство + MTU. При смене
+	// любого из них конфиг считается недействительным (сервер выдаст новый).
+	wgKey := fmt.Sprintf("%s|%s|%s|%d", prof.PeerAddr, prof.Password, deviceID, p.MTU)
+	cachedWG := o.wgCacheGet(wgKey)
+
 	cfg := core.Config{
 		PeerAddr:    prof.PeerAddr,
 		Password:    prof.Password,
@@ -626,6 +727,7 @@ func (o *Orchestrator) launch(p ConnectParams, isReconnect bool) (*coreSession, 
 		CaptchaMode: p.CaptchaMode,
 		VkAuthMode:  p.VkAuthMode,
 		WGConfigMTU: p.MTU,
+		WGConfig:    cachedWG,
 
 		// Наши уникальные фичи
 		AutoWG:         autoWG,
@@ -634,6 +736,9 @@ func (o *Orchestrator) launch(p ConnectParams, isReconnect bool) (*coreSession, 
 		WGInterface:    wgIfaceName,
 		ExcludeDomains: p.ExcludeDomains,
 		ObfsMode:       p.ObfsMode,
+	}
+	if cachedWG != "" {
+		log.Printf("[ORCH] WG-конфиг из бэкенд-кэша — реконнект без DTLS exchange")
 	}
 
 	// Регистрируем WebView2-решатель капчи для Windows
@@ -645,7 +750,8 @@ func (o *Orchestrator) launch(p ConnectParams, isReconnect bool) (*coreSession, 
 		return nil, fmt.Errorf("core start: %w", err)
 	}
 
-	sess := &coreSession{c: c, doneCh: events, done: make(chan struct{}), params: p, isReconnect: isReconnect}
+	sess := &coreSession{c: c, doneCh: events, done: make(chan struct{}), params: p, isReconnect: isReconnect, wgKey: wgKey}
+	sess.usedCachedWG.Store(cachedWG != "")
 	o.mu.Lock()
 	// Остановка по ошибке схемы — не «по кнопке»: для reconnect-сессий
 	// она приведёт к следующей попытке с backoff.
@@ -656,27 +762,48 @@ func (o *Orchestrator) launch(p ConnectParams, isReconnect bool) (*coreSession, 
 	if o.onTray != nil {
 		go o.statsLoop(sess)
 	}
-	if p.AutoReconnect {
-		go o.watchdogLoop(sess)
-	}
+	// Watchdog работает всегда (C7): даже без автопереподключения он
+	// показывает degraded и пробует soft restart воркеров.
+	go o.watchdogLoop(sess)
 	return sess, nil
 }
 
-// watchdogLoop перезапускает сессию, если поднятый туннель слишком долго
-// остаётся без живых воркеров (см. tunnelDownRestartAfter). Перезапуск идёт
-// через обычный путь автопереподключения: stopSession(…, false) →
-// forwardEvents → scheduleReconnect.
+// watchdogLoop следит за живостью воркеров. Работает всегда (C7):
+//
+//   - через workerDegradedAfter без воркеров переводит UI в degraded;
+//   - через workerSoftRestartAfter делает soft restart только воркеров,
+//     сохраняя WG/DNS/маршруты (C3), и повторяет попытки, пока воркеры
+//     не восстановятся.
+//
+// Полный teardown здесь НЕ выполняется: обрыв воркеров — не повод сносить
+// WG/DNS. Полный перезапуск происходит только при смене сети (route guard)
+// или кредов (новый профиль/пароль).
 func (o *Orchestrator) watchdogLoop(sess *coreSession) {
 	t := time.NewTicker(watchdogInterval)
 	defer t.Stop()
 	var downSince time.Time
+	var lastSoftRestart time.Time
+	degraded := false
 	for {
 		select {
 		case <-sess.done:
 			return
 		case <-t.C:
 		}
-		if !sess.wasUp.Load() || sess.c.Stats().ActiveConnections > 0 {
+
+		alive := sess.c.Stats().ActiveConnections
+		if alive > 0 {
+			downSince = time.Time{}
+			lastSoftRestart = time.Time{}
+			if degraded {
+				degraded = false
+				emitLogEvent(o.appCtx, "INFO", "[WATCHDOG] Воркеры восстановились — туннель снова в норме")
+				o.emitState("connected")
+			}
+			continue
+		}
+		if !sess.wasUp.Load() {
+			// Туннель ещё не поднимался — ошибки старта показывает pipeline.
 			downSince = time.Time{}
 			continue
 		}
@@ -684,14 +811,20 @@ func (o *Orchestrator) watchdogLoop(sess *coreSession) {
 			downSince = time.Now()
 			continue
 		}
+
 		down := time.Since(downSince)
-		if down < tunnelDownRestartAfter {
-			continue
+		if !degraded && down >= workerDegradedAfter {
+			degraded = true
+			log.Printf("[WATCHDOG] Нет живых воркеров %.0fs — туннель деградирован", down.Seconds())
+			o.emitState("degraded")
 		}
-		// log.Printf попадает и в файл сессии, и в UI (через wailsLogWriter).
-		log.Printf("[WATCHDOG] Нет живых воркеров %.0fs — перезапускаем сессию целиком", down.Seconds())
-		o.stopSession(sess, false)
-		return
+		if down >= workerSoftRestartAfter &&
+			(lastSoftRestart.IsZero() || time.Since(lastSoftRestart) >= tunnelDownRestartAfter) {
+			if sess.c.RestartWorkers() {
+				lastSoftRestart = time.Now()
+				log.Printf("[WATCHDOG] Нет воркеров %.0fs — soft restart воркеров (WG/DNS сохранены)", down.Seconds())
+			}
+		}
 	}
 }
 
@@ -717,10 +850,10 @@ func (o *Orchestrator) forwardEvents(sess *coreSession) {
 	for ev := range sess.doneCh {
 		switch ev.Type {
 		case core.EventState:
-			runtime.EventsEmit(o.appCtx, "state_changed", ev.Status, "")
-			runtime.EventsEmit(o.appCtx, "log", "INFO", fmt.Sprintf("[СОСТОЯНИЕ] %s", ev.Status))
+			o.emitState(ev.Status)
+			emitLogEvent(o.appCtx, "INFO", fmt.Sprintf("[СОСТОЯНИЕ] %s", ev.Status))
 		case core.EventLog:
-			runtime.EventsEmit(o.appCtx, "log", ev.Level, ev.Msg)
+			emitLogEvent(o.appCtx, ev.Level, ev.Msg)
 			if strings.Contains(ev.Msg, "VK_AUTH_REQUIRED|") {
 				parts := strings.SplitN(ev.Msg, "VK_AUTH_REQUIRED|", 2)
 				if len(parts) == 2 {
@@ -729,14 +862,45 @@ func (o *Orchestrator) forwardEvents(sess *coreSession) {
 				}
 			}
 		case core.EventError:
+			o.setLastError(ev.Msg)
 			runtime.EventsEmit(o.appCtx, "error", ev.Msg)
-			runtime.EventsEmit(o.appCtx, "log", "ERROR", fmt.Sprintf("[ОШИБКА] %s", ev.Msg))
+			emitLogEvent(o.appCtx, "ERROR", fmt.Sprintf("[ОШИБКА] %s", ev.Msg))
 		case core.EventEvent:
 			o.handlePipelineEvent(ev)
 			if ev.Name == "wg_config" {
-				runtime.EventsEmit(o.appCtx, "log", "INFO", "[WG] Применение конфига...")
-				runtime.EventsEmit(o.appCtx, "log", "INFO", "[WG] Конфиг применён, туннель активен ✓")
-				runtime.EventsEmit(o.appCtx, "state_changed", "running", "")
+				// Кэшируем на уровне бэкенда: переживёт сессию (C2).
+				o.wgCachePut(sess.wgKey, ev.Data)
+				emitLogEvent(o.appCtx, "INFO", "[WG] Применение конфига...")
+			}
+			if ev.Name == "wg_failed" {
+				o.wgCacheInvalidate(sess.wgKey)
+				if sess.usedCachedWG.Swap(false) {
+					// Кэш устарел (сервер ротировал ключи/адрес) — одна
+					// повторная попытка со свежим конфигом от сервера.
+					sess.isReconnect = true
+					log.Printf("[WG] Кэшированный конфиг не подошёл — переподключаемся со свежим")
+					go o.stopSession(sess, false)
+				}
+			}
+			if ev.Name == "route_guard_switch" && sess.wasUp.Load() {
+				// Смена физической сети (уровень 2, C3): старые TURN-аллокации
+				// мертвы, исключения переставлены. Полный перезапуск с
+				// бэкенд-кэшем WG-конфига занимает ~1с; при выключенном
+				// автопереподключении ограничиваемся soft restart, чтобы
+				// не оставить пользователя без туннеля.
+				// Не чаще раза в минуту: guard может «моргнуть» дважды
+				// при переключении между двумя адаптерами.
+				now := time.Now().Unix()
+				last := sess.lastNetRestart.Load()
+				if now-last >= 60 && sess.lastNetRestart.CompareAndSwap(last, now) {
+					if sess.params.AutoReconnect {
+						log.Printf("[WATCHDOG] Смена сети — полный перезапуск сессии")
+						go o.stopSession(sess, false)
+					} else {
+						log.Printf("[WATCHDOG] Смена сети — soft restart воркеров (WG/DNS сохранены)")
+						sess.c.RestartWorkers()
+					}
+				}
 			}
 			if ev.Name == "captcha_required" {
 				runtime.EventsEmit(o.appCtx, "captcha_required", ev.Data)
@@ -746,20 +910,29 @@ func (o *Orchestrator) forwardEvents(sess *coreSession) {
 			}
 			if ev.Name == "fatal_auth" {
 				sess.fatal.Store(true)
+				o.setLastError(ev.Data)
 				runtime.EventsEmit(o.appCtx, "error", ev.Data)
 			}
 			if ev.Name == "wg_up" {
 				sess.wasUp.Store(true)
 				sess.upAt.Store(time.Now().Unix())
+				o.setLastError("")
 				if sess.isReconnect {
-					runtime.EventsEmit(o.appCtx, "log", "INFO", "[RECONNECT] Туннель восстановлен ✓")
+					emitLogEvent(o.appCtx, "INFO", "[RECONNECT] Туннель восстановлен ✓")
 				}
 			}
 			runtime.EventsEmit(o.appCtx, "event", ev.Name, ev.Data)
 		}
 	}
-	// Канал закрыт — core завершился
-	core.TeardownWindowsWireGuard()
+	// Канал закрыт — core завершился.
+	// Сносим WG только если эта сессия всё ещё текущая: иначе можно
+	// погасить интерфейс уже новой сессии, поднятой после реконнекта.
+	o.mu.Lock()
+	isCurrent := o.sess == sess
+	o.mu.Unlock()
+	if isCurrent {
+		core.TeardownWindowsWireGuard()
+	}
 	if lw, ok := log.Writer().(*wailsLogWriter); ok {
 		select {
 		case <-lw.stop:
@@ -773,9 +946,10 @@ func (o *Orchestrator) forwardEvents(sess *coreSession) {
 	if o.prevLogWriter != nil {
 		log.SetOutput(o.prevLogWriter)
 	}
+	logWriterActive.Store(false)
 	ts := time.Now().Format("15:04:05")
-	runtime.EventsEmit(o.appCtx, "log", "INFO", fmt.Sprintf("[%s] Сессия завершена", ts))
-	runtime.EventsEmit(o.appCtx, "log", "INFO", "[СОСТОЯНИЕ] Туннель остановлен")
+	emitLogEvent(o.appCtx, "INFO", fmt.Sprintf("[%s] Сессия завершена", ts))
+	emitLogEvent(o.appCtx, "INFO", "[СОСТОЯНИЕ] Туннель остановлен")
 	o.mu.Lock()
 	if o.sess == sess {
 		o.sess = nil
@@ -789,7 +963,7 @@ func (o *Orchestrator) forwardEvents(sess *coreSession) {
 	if o.scheduleReconnect(sess) {
 		return
 	}
-	runtime.EventsEmit(o.appCtx, "state_changed", "disconnected", "")
+	o.emitState("disconnected")
 }
 
 // scheduleReconnect решает, нужно ли поднимать сессию заново, и если да —
@@ -827,8 +1001,8 @@ func (o *Orchestrator) scheduleReconnect(sess *coreSession) bool {
 	o.reconnectTimer = time.AfterFunc(delay, func() { o.doReconnect(params) })
 	o.mu.Unlock()
 
-	runtime.EventsEmit(o.appCtx, "log", "WARN", fmt.Sprintf("[RECONNECT] Туннель упал, переподключение через %v (попытка %d)", delay, attempt+1))
-	runtime.EventsEmit(o.appCtx, "state_changed", "reconnecting", "")
+	emitLogEvent(o.appCtx, "WARN", fmt.Sprintf("[RECONNECT] Туннель упал, переподключение через %v (попытка %d)", delay, attempt+1))
+	o.emitState("reconnecting")
 	return true
 }
 
@@ -842,13 +1016,15 @@ func (o *Orchestrator) doReconnect(params ConnectParams) {
 	o.reconnectTimer = nil
 	o.mu.Unlock()
 
-	runtime.EventsEmit(o.appCtx, "log", "INFO", "[RECONNECT] Переподключение...")
+	emitLogEvent(o.appCtx, "INFO", "[RECONNECT] Переподключение...")
+	o.reconnects.Add(1)
 	if err := o.start(params, true); err != nil {
-		runtime.EventsEmit(o.appCtx, "log", "ERROR", fmt.Sprintf("[RECONNECT] Не удалось запустить: %v", err))
+		o.setLastError(err.Error())
+		emitLogEvent(o.appCtx, "ERROR", fmt.Sprintf("[RECONNECT] Не удалось запустить: %v", err))
 		// Поднять не удалось (порт занят, профиль пропал…) — планируем ещё раз.
 		fake := &coreSession{params: params, isReconnect: true}
 		if !o.scheduleReconnect(fake) {
-			runtime.EventsEmit(o.appCtx, "state_changed", "disconnected", "")
+			o.emitState("disconnected")
 		}
 	}
 }
@@ -878,7 +1054,9 @@ func (o *Orchestrator) handlePipelineEvent(ev core.Event) {
 	}
 	switch ev.Name {
 	case "pipeline_start":
-		pc.setCurrent(o.appCtx, stepDNS)
+		// DNS-этап завершается сразу: адреса VK/TURN резолвятся до старта пайплайна.
+		pc.markCompleted(o.appCtx, stepDNS)
+		pc.setCurrent(o.appCtx, stepVK)
 	case "vk_creds_ok":
 		pc.markCompleted(o.appCtx, stepVK)
 		pc.setCurrent(o.appCtx, stepWrap)
@@ -900,23 +1078,28 @@ func (o *Orchestrator) handlePipelineEvent(ev core.Event) {
 	case "wg_up":
 		pc.markCompleted(o.appCtx, stepWG)
 		pc.finish(o.appCtx)
+	case "wg_failed":
+		// Без этого схема навсегда замирала на этапе WireGuard:
+		// stepWG не входит в таймауты armTimeoutLocked.
+		emitLogEvent(o.appCtx, "ERROR", "[СХЕМА] Ошибка WireGuard: "+ev.Data)
+		pc.markFailed(o.appCtx, stepWG, false, 0, ev.Data)
 	case "wrap_auth_timeout":
 		reason := "WRAP/DTLS не подтверждён: неверный пароль, сервер недоступен или UDP режет оператор"
 		if pc.onDTLSResult(false) {
-			runtime.EventsEmit(o.appCtx, "log", "ERROR", "[СХЕМА] Ошибка DTLS: "+reason)
+			emitLogEvent(o.appCtx, "ERROR", "[СХЕМА] Ошибка DTLS: "+reason)
 			pc.markFailed(o.appCtx, stepDTLS, false, 0, reason)
 		} else {
-			runtime.EventsEmit(o.appCtx, "log", "WARN", "[DTLS] Таймаут хендшейка воркера, повторим ("+ev.Data+")")
+			emitLogEvent(o.appCtx, "WARN", "[DTLS] Таймаут хендшейка воркера, повторим ("+ev.Data+")")
 		}
 	case "dtls_error":
 		if pc.onDTLSResult(false) {
-			runtime.EventsEmit(o.appCtx, "log", "ERROR", "[СХЕМА] Ошибка DTLS: "+ev.Data)
+			emitLogEvent(o.appCtx, "ERROR", "[СХЕМА] Ошибка DTLS: "+ev.Data)
 			pc.markFailed(o.appCtx, stepDTLS, false, 0, ev.Data)
 		} else {
-			runtime.EventsEmit(o.appCtx, "log", "WARN", "[DTLS] Ошибка хендшейка воркера, повторим ("+ev.Data+")")
+			emitLogEvent(o.appCtx, "WARN", "[DTLS] Ошибка хендшейка воркера, повторим ("+ev.Data+")")
 		}
 	case "fatal_auth":
-		runtime.EventsEmit(o.appCtx, "log", "ERROR", "[СХЕМА] Ошибка авторизации: "+ev.Data)
+		emitLogEvent(o.appCtx, "ERROR", "[СХЕМА] Ошибка авторизации: "+ev.Data)
 		pc.markFatal(o.appCtx, ev.Data)
 	}
 }
@@ -928,8 +1111,8 @@ func (o *Orchestrator) handlePipelineEvent(ev core.Event) {
 func (o *Orchestrator) Stop() {
 	// Пользователь нажал «Отключить»: отменяем ожидающее переподключение.
 	if o.cancelReconnect() {
-		runtime.EventsEmit(o.appCtx, "log", "INFO", "[RECONNECT] Автопереподключение отменено")
-		runtime.EventsEmit(o.appCtx, "state_changed", "disconnected", "")
+		emitLogEvent(o.appCtx, "INFO", "[RECONNECT] Автопереподключение отменено")
+		o.emitState("disconnected")
 	}
 	o.mu.Lock()
 	sess := o.sess
@@ -960,11 +1143,16 @@ func (o *Orchestrator) stopSession(sess *coreSession, userInitiated bool) {
 	// Force-clear session even if teardown hasn't completed,
 	// so the next Start() doesn't get "already running".
 	o.mu.Lock()
-	if o.sess == sess {
+	wasCurrent := o.sess == sess
+	if wasCurrent {
 		o.sess = nil
 	}
 	o.mu.Unlock()
-	core.TeardownWindowsWireGuard()
+	// Сносим WG только если сессия была текущей: старый Stop() не должен
+	// разбирать туннель, который уже принадлежит новой сессии.
+	if wasCurrent {
+		core.TeardownWindowsWireGuard()
+	}
 }
 
 // SendCaptchaResult передаёт токен капчи в ядро.

@@ -139,7 +139,18 @@ func (a *App) SetCloseActionPreference(action string) {
 func (a *App) GetSettings() AppSettings { return a.store.GetSettings() }
 
 // SaveSettings persists app settings from the frontend.
-func (a *App) SaveSettings(st AppSettings) error { return a.store.SaveSettings(st) }
+func (a *App) SaveSettings(st AppSettings) error {
+	if err := a.store.SaveSettings(st); err != nil {
+		return err
+	}
+	a.applySettings(a.store.GetSettings())
+	return nil
+}
+
+// applySettings применяет сохранённые настройки к рантайму (не к диску).
+func (a *App) applySettings(st AppSettings) {
+	a.closeAction.Store(st.CloseAction)
+}
 
 // ListSubscriptions returns all persisted subscriptions.
 func (a *App) ListSubscriptions() []Subscription { return a.store.ListSubscriptions() }
@@ -198,8 +209,8 @@ func (a *App) Disconnect() { a.orch.Stop() }
 // ForceDisconnect — принудительный сброс состояния (если сессия зависла).
 func (a *App) ForceDisconnect() {
 	a.orch.Stop()
-	runtime.EventsEmit(a.ctx, "state_changed", "disconnected")
-	runtime.EventsEmit(a.ctx, "log", "WARN", "Принудительный сброс состояния туннеля")
+	a.orch.emitState("disconnected")
+	emitLogEvent(a.ctx, "WARN", "Принудительный сброс состояния туннеля")
 }
 
 // IsRunning — работает ли туннель прямо сейчас.

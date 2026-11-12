@@ -15,9 +15,12 @@ import { toastStore } from './lib/stores/toastStore';
 import { logStore } from './lib/stores/logStore';
 import { tunnelStore } from './lib/stores/tunnelStore';
 import { pipelineStore } from './lib/stores/pipelineStore';
+import type { ConnectionStep } from './lib/stores/pipelineStore';
 import type { LogLevel } from './lib/stores/logStore';
+import type { Dashboard } from './lib/types';
 import { EventsOn } from '../wailsjs/runtime/runtime';
-import { settingsStore } from './lib/store';
+import { settingsStore, hydrateAppState } from './lib/store';
+import { statsStore } from './lib/stores/statsStore';
 import { SetTrayEnabled, SetCloseAction, SetCloseActionPreference } from '../wailsjs/go/backend/App';
 
 function useWdttPaste() {
@@ -44,29 +47,47 @@ function useWailsEvents() {
       EventsOn('log', (level: unknown, msg: unknown) => {
         logStore.push((level as LogLevel) ?? 'INFO', String(msg ?? ''));
       }),
+      // U8: основной канал логов — один батч на флаш вместо события на строку.
+      EventsOn('logs_batch', (records: unknown) => {
+        if (Array.isArray(records)) logStore.pushBatch(records);
+      }),
+      // U1/U8: отдельный канал статистики для дашборда.
+      EventsOn('stats', (d: unknown) => {
+        if (d && typeof d === 'object') statsStore.set(d as Dashboard);
+      }),
       EventsOn('error', (msg: unknown) => {
-        logStore.push('ERROR', String(msg ?? ''));
+        const text = String(msg ?? '');
+        logStore.push('ERROR', text);
+        if (text) toastStore.show(text, 4000);
       }),
       EventsOn('state_changed', (status: unknown) => {
         const s = String(status ?? '');
-        if (s === 'running') { tunnelStore.set('connected'); logStore.push('INFO', '✓ Туннель активен'); }
+        // Core сообщает "connected" после фактического wg_up; "running"
+        // оставлен для обратной совместимости со старыми сборками.
+        if (s === 'connected' || s === 'running') { tunnelStore.set('connected'); logStore.push('INFO', '✓ Туннель активен'); }
         else if (s === 'connecting') { tunnelStore.set('connecting'); logStore.push('INFO', '⟳ Подключение...'); }
-        else if (s === 'reconnecting') { tunnelStore.set('reconnecting'); logStore.push('WARN', '⟳ Обрыв — переподключение...'); pipelineStore.hide(); }
-        else if (s === 'stopped' || s === 'error' || s === 'disconnected') { tunnelStore.set('idle'); logStore.push('INFO', '— Отключено'); pipelineStore.hide(); }
+        else if (s === 'reconnecting') { tunnelStore.set('reconnecting'); logStore.push('WARN', '⟳ Обрыв — переподключение...'); pipelineStore.hideUnlessFailed(); }
+        else if (s === 'degraded') { tunnelStore.set('degraded'); logStore.push('WARN', '⚠ Воркеры потеряны — туннель деградирован, восстанавливаем...'); }
+        else if (s === 'stopped' || s === 'error' || s === 'disconnected') { tunnelStore.set('idle'); logStore.push('INFO', '— Отключено'); pipelineStore.hideUnlessFailed(); }
       }),
       EventsOn('pipeline_state', (payload: unknown) => {
-        const p = payload && typeof payload === 'object' ? payload : {};
+        const p = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>;
+        const asStep = (v: unknown): ConnectionStep | null =>
+          typeof v === 'string' ? (v as ConnectionStep) : null;
         pipelineStore.setFromBackend({
-          visible: Boolean((p as any).visible),
-          current: (p as any).current ?? null,
-          completed: Array.isArray((p as any).completed) ? (p as any).completed : [],
-          failed: (p as any).failed ?? null,
-          timedOut: Boolean((p as any).timedOut),
-          timeoutSec: Number((p as any).timeoutSec ?? 0),
+          visible: Boolean(p.visible),
+          current: asStep(p.current),
+          completed: Array.isArray(p.completed)
+            ? p.completed.filter((x): x is ConnectionStep => typeof x === 'string')
+            : [],
+          failed: asStep(p.failed),
+          timedOut: Boolean(p.timedOut),
+          timeoutSec: Number(p.timeoutSec ?? 0),
         });
       }),
       EventsOn('event', (name: unknown) => {
-        if (name === 'wg_config') tunnelStore.set('connected');
+        // Состояние "connected" больше не выставляется по wg_config:
+        // конфиг лишь применён, интерфейс поднимается позже (событие wg_up).
         if (name === 'pipeline_start') pipelineStore.reset();
       }),
       EventsOn('vk_auth_required', (hash: unknown) => {
@@ -91,14 +112,29 @@ function useWailsEvents() {
 export default function App() {
   useWailsEvents();
   useWdttPaste();
+  const [ready, setReady] = useState(false);
   const [closeDialog, setCloseDialog] = useState(false);
   const [showCaptcha, setShowCaptcha] = useState(false);
   const [updateInfo, setUpdateInfo] = useState<{ version: string; url: string } | null>(null);
 
+  // Гидратация стора из бэкенда (Q1) должна завершиться до монтирования
+  // страниц, иначе они прочитают пустой кэш и покажут дефолты.
   useEffect(() => {
-    const s = settingsStore.get();
-    SetTrayEnabled(s.tray);
-    SetCloseActionPreference(s.closeAction);
+    let alive = true;
+    hydrateAppState()
+      .then(state => {
+        if (!alive) return;
+        statsStore.set(state.dashboard);
+        const s = settingsStore.get();
+        SetTrayEnabled(s.tray);
+        SetCloseActionPreference(s.closeAction);
+        setReady(true);
+      })
+      .catch(err => {
+        console.error('[app] hydrate failed:', err);
+        if (alive) setReady(true);
+      });
+    return () => { alive = false; };
   }, []);
 
   useEffect(() => {
@@ -119,6 +155,22 @@ export default function App() {
     }
     SetCloseAction(action, remember);
   };
+
+  if (!ready) {
+    return (
+      <div
+        role="status"
+        aria-live="polite"
+        style={{
+          minHeight: '100vh', display: 'flex', alignItems: 'center',
+          justifyContent: 'center', background: 'var(--bg)', color: 'var(--text-3)',
+          fontFamily: 'Geist, sans-serif', fontSize: 14,
+        }}
+      >
+        Загрузка…
+      </div>
+    );
+  }
 
   return (
     <BrowserRouter>

@@ -56,7 +56,7 @@ export default function Deploy() {
     setDeployState('deploying');
     try {
       await WailsDeploy(buildParams());
-    } catch (e: any) {
+    } catch (e: unknown) {
       setLogs(prev => [...prev, '❌ ' + String(e)]);
       setDeployState('idle');
     }
@@ -68,7 +68,7 @@ export default function Deploy() {
     setDeployState('removing');
     try {
       await WailsUndeploy(buildParams());
-    } catch (e: any) {
+    } catch (e: unknown) {
       setLogs(prev => [...prev, '❌ ' + String(e)]);
       setDeployState('idle');
     }

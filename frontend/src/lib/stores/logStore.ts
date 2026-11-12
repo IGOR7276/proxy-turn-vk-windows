@@ -15,7 +15,7 @@ type Listener = (entries: InternalEntry[]) => void;
 let seq = 0;
 let entries: InternalEntry[] = [];
 const listeners = new Set<Listener>();
-const MAX_ENTRIES = 500;
+const MAX_ENTRIES = 5000;
 
 function notify() {
   listeners.forEach(fn => fn([...entries]));
@@ -70,6 +70,16 @@ function assignKey(message: string, level: LogLevel): { key?: string; priority?:
   return {};
 }
 
+function nowTime(): string {
+  return new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+function normalizeLevel(level: string | undefined): LogLevel {
+  const l = String(level ?? '').toUpperCase();
+  if (l === 'ERROR' || l === 'WARN' || l === 'DEBUG' || l === 'INFO') return l;
+  return 'INFO';
+}
+
 export const logStore = {
   subscribe: (fn: Listener) => {
     listeners.add(fn);
@@ -91,6 +101,20 @@ export const logStore = {
     const entry: InternalEntry = { id: seq++, level, message, time, count: 1, key, priority };
     entries = [...entries, entry];
     if (entries.length > MAX_ENTRIES) entries = entries.slice(-MAX_ENTRIES);
+    notify();
+  },
+
+  pushBatch: (records: Array<{ level?: string; msg?: string; time?: string }>) => {
+    if (!records || records.length === 0) return;
+    const next = [...entries];
+    for (const r of records) {
+      const level = normalizeLevel(r.level);
+      const message = String(r.msg ?? '');
+      const time = r.time || nowTime();
+      const { key, priority } = assignKey(message, level);
+      next.push({ id: seq++, level, message, time, count: 1, key, priority });
+    }
+    entries = next.length > MAX_ENTRIES ? next.slice(-MAX_ENTRIES) : next;
     notify();
   },
 
